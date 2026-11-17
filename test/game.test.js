@@ -4,12 +4,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function loadGame() {
+function loadGame(seed = 1) {
+  let r = seed; // deterministic randomness, so a failure can be replayed
+  const M = Object.create(Math); M.random = () => (r = (r * 16807) % 2147483647) / 2147483647;
   const el = () => ({ hidden: true, onclick: null, textContent: '' });
   const els = {};
   const store = {};
   const ctx = {
-    console, Math, JSON, Set, Map, Object, Array, Number, String,
+    console, Math: M, JSON, Set, Map, Object, Array, Number, String,
     addEventListener() {}, setInterval() {}, confirm: () => false,
     location: { reload() {} },
     document: { getElementById: (id) => (els[id] ||= el()), hidden: false },
@@ -19,7 +21,7 @@ function loadGame() {
   const src = fs.readFileSync(new URL('../public/game.js', import.meta.url), 'utf8');
   vm.runInContext(src + '\n;globalThis.__g = { G, player, stalls, coop, oven, PADS, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, padVisible, padPaid, load, save };', ctx);
   ctx.__g.load();
-  return { g: ctx.__g, els, store };
+  return { g: ctx.__g, els, store, ctx };
 }
 
 // Same strategy as the browser check: buy what is affordable, collect money, keep shelves stocked,
@@ -29,10 +31,12 @@ function play(g, seconds) {
   const CASH = { egg: 'cashEgg', wood: 'cashWood', pie: 'cashPie' };
   const open = () => Object.values(g.stalls).filter((s) => g.G.bought.has(s.id));
   const go = (x, y) => { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy), st = p.speed / 30; if (d > .3) { p.x += dx / d * Math.min(st, d); p.y += dy / d * Math.min(st, d); return false; } return true; };
-  const tree = () => g.trees.find((t) => t.logs > 0);
+  let skip = 0; // rotates which tree to use after a timeout
+  const tree = () => { const ok = g.trees.filter((t) => t.logs > 0); return ok[skip % Math.max(1, ok.length)]; };
   let task = null, forOven = false;
   const seen = new Set(g.G.bought);
   for (let i = 0; i < seconds * 30 && !g.G.won; i++) {
+    if (task && i - task.since > 30 * 12) { task = null; skip++; } // target unreachable (e.g. blocked by trees): pick another
     if (!task) {
       const pad = g.PADS.find((q) => g.padVisible(q) && g.G.coins + g.padPaid(q) >= q.cost);
       const waiting = open().find((s) => !g.G.bought.has(CASH[s.type]) && s.shelf > 0 && s.queue[0] && s.queue[0].arrived && s.queue[0].pat < s.queue[0].patMax * .6);
@@ -41,7 +45,7 @@ function play(g, seconds) {
       else if (waiting) task = { k: 'drop', x: waiting.drop.x, y: waiting.drop.y, s: waiting };
       else if (rich) task = { k: 'coins', x: rich.cz.x, y: rich.cz.y, s: rich };
       else if (p.stack.length && forOven && !(p.stack.length < p.cap && p.stack.every((q) => q.t === 'egg'))) { task = { k: 'oven', x: g.OVEN_IN.x, y: g.OVEN_IN.y }; forOven = false; }
-      else if (p.stack.length && forOven) { const t = tree(); task = { k: 'gather', x: t.x, y: t.y + .8 }; }
+      else if (p.stack.length && forOven) { const t = tree(); task = { k: 'gather', x: t.x, y: t.y + .6 }; }
       else if (p.stack.length) {
         const types = new Set(p.stack.map((s) => s.t));
         const st = open().find((s) => types.has(s.type) && s.shelf < s.max);
@@ -51,11 +55,13 @@ function play(g, seconds) {
       } else {
         const st = open().sort((a, b) => (a.shelf - a.queue.length * 2) - (b.shelf - b.queue.length * 2))[0];
         if (st.type === 'egg') task = { k: 'gather', x: g.NEST.x, y: g.NEST.y };
-        else if (st.type === 'wood') { const t = tree(); task = t ? { k: 'gather', x: t.x, y: t.y + .8 } : { k: 'gather', x: g.NEST.x, y: g.NEST.y }; }
+        else if (st.type === 'wood') { const t = tree(); task = t ? { k: 'gather', x: t.x, y: t.y + .6 } : { k: 'gather', x: g.NEST.x, y: g.NEST.y }; }
         else if (g.oven.pies > 0) task = { k: 'gather', x: g.OVEN_OUT.x, y: g.OVEN_OUT.y };
         else if (p.stack.length < p.cap / 2) { task = { k: 'gather', x: g.NEST.x, y: g.NEST.y, half: true }; forOven = true; }
       }
     }
+    if (task && task.since === undefined) task.since = i;
+    if (task && task.k === 'gather' && p.stack.length >= (task.half ? p.cap / 2 : p.cap)) task = null;
     if (task && go(task.x, task.y)) {
       task.here = (task.here || 0) + 1 / 30;
       const done = task.k === 'pad' ? (g.G.bought.has(task.id) || g.G.coins === 0)
@@ -73,11 +79,13 @@ function play(g, seconds) {
 }
 
 test('a bot can build the whole village and open the fair', () => {
-  const { g, els } = loadGame();
-  const log = play(g, 1800);
-  assert.ok(g.G.won, `not finished in 30 min of game time; bought: ${log.join(', ')}`);
-  assert.equal(els.win.hidden, false, 'the win screen is shown');
-  assert.ok(g.G.time < 1500, `took ${Math.round(g.G.time)} s`);
+  for (let seed = 1; seed <= 12; seed++) {
+    const { g, els } = loadGame(seed);
+    const log = play(g, 1800);
+    assert.ok(g.G.won, `seed ${seed}: not finished in 30 min of game time; bought: ${log.join(', ')}`);
+    assert.equal(els.win.hidden, false, 'the win screen is shown');
+    assert.ok(g.G.time < 1500, `seed ${seed}: took ${Math.round(g.G.time)} s`);
+  }
 });
 
 test('selling needs someone at the counter until a cashier is hired', () => {
@@ -100,4 +108,16 @@ test('save and load restore progress', () => {
   assert.equal(b.g.G.coins, 42);
   assert.ok(b.g.G.bought.has('chick2'));
   assert.equal(b.g.coop.n, 2);
+});
+
+test('the touch joystick moves the player', () => {
+  const { g, ctx } = loadGame();
+  const p = g.player, x0 = p.x, y0 = p.y;
+  vm.runInContext('joy = { id: 1, ox: 100, oy: 100, x: 100, y: 40 }', ctx); // drag up
+  for (let i = 0; i < 30; i++) g.update(1 / 30);
+  assert.ok(p.y < y0 - 2, `moved north: y ${y0} -> ${p.y}`);
+  assert.ok(Math.abs(p.x - x0) < .3, 'no sideways drift');
+  vm.runInContext('joy = { id: 1, ox: 100, oy: 100, x: 160, y: 100 }', ctx); // drag right
+  for (let i = 0; i < 15; i++) g.update(1 / 30);
+  assert.ok(p.x > x0 + 1, `moved east: x ${x0} -> ${p.x}`);
 });

@@ -869,13 +869,22 @@ function watchPerf(rawDt) {
     perfStage++;
   } else perfStage = 9;
 }
+let lastError = null;
 function frame(t) {
+  requestAnimationFrame(frame); // first, so one bad frame cannot stop the game
   const raw = (t - last) / 1000;
   const dt = Math.min(.05, raw); last = t;
-  if (now > 1) watchPerf(raw);
-  if (win.hidden) update(dt);
-  render(dt);
-  requestAnimationFrame(frame);
+  try {
+    if (now > 1) watchPerf(raw);
+    if (win.hidden) update(dt);
+    render(dt);
+  } catch (e) {
+    if (!lastError) console.error(e);
+    lastError = String(e && e.message || e);
+    o.setTransform(1, 0, 0, 1, 0, 0); o.font = '12px system-ui'; o.fillStyle = '#b00020';
+    o.fillText('ошибка: ' + lastError.slice(0, 80), 8, ov.height - 12);
+    o.setTransform(Math.min(2, devicePixelRatio || 1), 0, 0, Math.min(2, devicePixelRatio || 1), 0, 0);
+  }
 }
 requestAnimationFrame(frame);
 window.__game = { G, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, ready: true, fx: () => useFx };
