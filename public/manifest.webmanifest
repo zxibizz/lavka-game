@@ -1,0 +1,16 @@
+{
+  "name": "Лавочка",
+  "short_name": "Лавочка",
+  "description": "Ферма и лавка: собирай, продавай, отстраивай деревню. Без рекламы, работает офлайн",
+  "lang": "ru",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#5fb838",
+  "theme_color": "#5fb838",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
