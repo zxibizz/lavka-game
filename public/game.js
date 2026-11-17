@@ -1,6 +1,6 @@
 'use strict';
 // Bump together with VERSION in sw.js whenever anything in public/ changes.
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 // Game state and simulation. No rendering here: view.js draws the world.
 let camX = 10, camY = 14;
 const rnd = (a, b) => a + Math.random() * (b - a);

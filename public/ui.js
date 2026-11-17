@@ -71,6 +71,8 @@ function openPause() {
     return `<li class="${c >= n ? 'ok' : ''}">${goalIcon(g)}<span>${goalText(g)}</span><b>${g.k === 'build' ? (c ? '✓' : '') : g.k === 'rep' ? String(c).replace('.', ',') : Math.min(c, n) + '/' + n}</b></li>`;
   }).join('');
   $('pauseFps').textContent = window.__fps ? `${Math.round(window.__fps)} кадров/с` : '';
+  $('gfxLite').classList.toggle('on', window.__gfx === 'lite');
+  $('gfxFull').classList.toggle('on', window.__gfx !== 'lite');
   show('pause');
 }
 
@@ -115,6 +117,9 @@ function uiInit(resumed) {
   $('pauseResume').onclick = () => show(null);
   $('pauseRestart').onclick = () => { startLevel(G.level); show(null); };
   $('pauseMenu').onclick = () => { save(); openMenu(); };
+  const setGfx = (v) => { if (v === window.__gfx) return; try { localStorage.setItem('lavka-gfx', v); } catch (e) {} save(); location.reload(); };
+  $('gfxLite').onclick = () => setGfx('lite');
+  $('gfxFull').onclick = () => setGfx('full');
   $('resultNext').onclick = () => openIntro(G.level + 1);
   $('resultAgain').onclick = () => openIntro(G.level);
   $('resultMenu').onclick = () => { quitLevel(); openMenu(); };

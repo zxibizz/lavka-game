@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from './vendor/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from './vendor/jsm/utils/SkeletonUtils.js';
-import { mergeVertices } from './vendor/jsm/utils/BufferGeometryUtils.js';
+import { mergeVertices, mergeGeometries } from './vendor/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from './vendor/jsm/RoundedBoxGeometry.js';
 import { RoomEnvironment } from './vendor/jsm/environments/RoomEnvironment.js';
 import { EffectComposer } from './vendor/jsm/postprocessing/EffectComposer.js';
@@ -16,20 +16,37 @@ const FONT = '"Nunito", system-ui, sans-serif';
 
 // ---------- renderer, camera, lights ----------
 const QUALITY = new URLSearchParams(location.search).get('q'); // 'low' | 'high' | auto
+const DEBUG = new URLSearchParams(location.search).has('debug');
 const glCanvas = document.getElementById('gl');
 const ov = document.getElementById('ov'), o = ov.getContext('2d');
 const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, powerPreference: 'high-performance' });
 const MOBILE = matchMedia('(pointer: coarse)').matches;
+// 'lite' (default on phones): no shadow maps (soft blob shadows instead), simple materials, sparser forest and grass.
+// The pause menu switches it (saved in localStorage, applied after a reload); ?q=low|high overrides.
+let savedGfx = null; try { savedGfx = localStorage.getItem('lavka-gfx'); } catch (e) {}
+const GFX = QUALITY === 'high' ? 'full' : QUALITY === 'low' ? 'lite' : (savedGfx || (MOBILE ? 'lite' : 'full'));
+const LITE = GFX === 'lite';
+window.__gfx = GFX;
+function newMat(p = {}) {
+  if (!LITE) return new THREE.MeshStandardMaterial(p);
+  const { roughness, metalness, ...q } = p;
+  return new THREE.MeshLambertMaterial(q);
+}
+// shared materials for merged geometry with baked vertex colours (see bakeMerge / mergeSkinned)
+const BAKED_MAT = newMat({ vertexColors: true, roughness: .8, metalness: 0 });
+const CHAR_MAT = newMat({ vertexColors: true, roughness: .78, metalness: 0 });
 let DPR = Math.min(QUALITY === 'high' ? 2 : MOBILE ? 1.5 : 2, devicePixelRatio || 1);
 renderer.setPixelRatio(DPR);
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = !LITE;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.NeutralToneMapping;
 renderer.toneMappingExposure = .98;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#5fb838');
-scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), .04).texture;
-scene.environmentIntensity = .42;
+if (!LITE) {
+  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), .04).texture;
+  scene.environmentIntensity = .42;
+}
 const camera = new THREE.PerspectiveCamera(42, 1, .5, 200);
 const PITCH = 52 * Math.PI / 180;
 // post-processing: ambient occlusion gives the soft contact shading; switched off on slow devices
@@ -55,7 +72,7 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
-scene.add(new THREE.HemisphereLight('#eef8ff', '#5f9a45', 1.0));
+scene.add(new THREE.HemisphereLight('#eef8ff', '#5f9a45', LITE ? 1.55 : 1.0));
 const sun = new THREE.DirectionalLight('#fff0d4', 2.75);
 sun.position.set(4, 22, 24); sun.target.position.set(10, 0, 13);
 sun.castShadow = true;
@@ -68,7 +85,7 @@ scene.add(sun, sun.target);
 const matCache = new Map();
 function mat(color, extra) {
   const key = color + (extra ? JSON.stringify(extra) : '');
-  if (!matCache.has(key)) matCache.set(key, new THREE.MeshStandardMaterial({ color, roughness: .8, metalness: 0, ...extra }));
+  if (!matCache.has(key)) matCache.set(key, newMat({ color, roughness: .8, metalness: 0, ...extra }));
   return matCache.get(key);
 }
 function mesh(geo, m, x = 0, y = 0, z = 0, parent = scene) {
@@ -98,7 +115,7 @@ function prep(gltf, smooth) {
     m.castShadow = true; m.receiveShadow = true;
     if (smooth) { let g = m.geometry.clone(); g.deleteAttribute('normal'); g = mergeVertices(g, 1e-4); g.computeVertexNormals(); m.geometry = g; }
     const conv = old => {
-      const n = new THREE.MeshStandardMaterial({ color: vivid(old.color.clone()), map: old.map || null, alphaTest: old.alphaTest || (old.transparent ? .5 : 0), side: old.side, vertexColors: old.vertexColors, roughness: .78, metalness: 0 });
+      const n = newMat({ color: vivid(old.color.clone()), map: old.map || null, alphaTest: old.alphaTest || (old.transparent ? .5 : 0), side: old.side, vertexColors: old.vertexColors, roughness: .78, metalness: 0 });
       n.name = old.name; return n;
     };
     m.material = Array.isArray(m.material) ? m.material.map(conv) : conv(m.material);
@@ -109,7 +126,7 @@ function prep(gltf, smooth) {
 {
   const loader = new GLTFLoader();
   await Promise.all([
-    ...ASSETS.chars.map(n => loader.loadAsync(`assets/chars/${n}.glb`).then(g => { A[n] = prep(g, true); })),
+    ...ASSETS.chars.map(n => loader.loadAsync(`assets/chars/${n}.glb`).then(g => { A[n] = prep(g, true); mergeSkinned(A[n].scene); })),
     ...ASSETS.props.map(n => loader.loadAsync(`assets/props/${n}.glb`).then(g => { A[n] = prep(g, false); })),
   ]);
 }
@@ -130,11 +147,42 @@ const SACK_GEO = (() => {
 })();
 function sack(x, y, h, rot = 0, parent = scene) { const m = mesh(SACK_GEO, '#c9975a', x, 0, y, parent); m.scale.setScalar(h / .93); m.rotation.y = rot; mesh(new THREE.TorusGeometry(.11, .03, 6, 14).rotateX(Math.PI / 2), '#8a5a2b', 0, .74, 0, m); return m; }
 // smooth round bush
-function bush(x, y, s) {
-  const g = new THREE.Group(); g.position.set(x, 0, y); g.scale.setScalar(s); scene.add(g);
+function bush(x, y, s, parent = scene) {
+  const g = new THREE.Group(); g.position.set(x, 0, y); g.scale.setScalar(s); parent.add(g);
+  if (LITE) STATIC_BLOBS.push([x, y + .05, .75 * s, .6 * s]);
   for (const [dx, dy, dz, r, c] of [[0, .32, 0, .42, '#4cbb3c'], [-.32, .24, .12, .3, '#58c646'], [.33, .26, .08, .32, '#45b236'], [.05, .5, -.1, .3, '#62cf4c']]) mesh(new THREE.SphereGeometry(r, 16, 12), c, dx, dy, dz, g);
   return g;
 }
+// A glTF character arrives as ~10 skinned meshes (one per material) sharing one skeleton. Merge them into one
+// skinned mesh with vertex colours; userData.ranges remembers which vertices came from which material/mesh
+// so clothes can be recoloured per customer.
+function mergeSkinned(root) {
+  const parts = []; root.traverse(m => { if (m.isSkinnedMesh) parts.push(m); });
+  const sameBones = (p) => p.skeleton.bones.length === parts[0].skeleton.bones.length && p.skeleton.bones.every((b, i) => b === parts[0].skeleton.bones[i]);
+  if (parts.length < 2 || !parts.every(sameBones)) { console.warn('character parts not merged'); return; }
+  const geos = [], ranges = [], nm = new THREE.Matrix3();
+  let offset = 0;
+  for (const p of parts) {
+    let g = p.geometry.index ? p.geometry.toNonIndexed() : p.geometry.clone();
+    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'skinIndex', 'skinWeight'].includes(k)) g.deleteAttribute(k);
+    const mats = Array.isArray(p.material) ? p.material : [p.material];
+    const groups = g.groups.length ? g.groups : [{ start: 0, count: g.attributes.position.count, materialIndex: 0 }];
+    for (const gr of groups) {
+      const mt = mats.length === 1 ? mats[0] : mats[gr.materialIndex || 0] || mats[0];
+      ranges.push({ start: offset + gr.start, count: gr.count, mat: mt.name, mesh: (p.name || '') + ' ' + (p.parent && p.parent.name || '') });
+    }
+    colorAttr(g, mats);
+    g.applyMatrix4(p.bindMatrix); // bake each part's bind pose so the merged mesh can use an identity bind matrix
+    offset += g.attributes.position.count; geos.push(g);
+  }
+  const merged = new THREE.SkinnedMesh(mergeGeometries(geos), CHAR_MAT);
+  merged.name = 'merged'; merged.castShadow = merged.receiveShadow = true; merged.frustumCulled = false;
+  merged.userData.ranges = ranges;
+  parts[0].parent.add(merged);
+  merged.bind(parts[0].skeleton, new THREE.Matrix4());
+  for (const p of parts) p.removeFromParent();
+}
+
 // static copy of a model scaled to the given height, standing on the ground, centred on (x, y)
 function model(name, height, x = 0, y = 0, rotY = 0, parent = scene, colors) {
   const a = A[name], o = a.scene.clone(true), s = height / a.size.y;
@@ -186,7 +234,7 @@ const pathMask = (() => {
     g.fillStyle = srnd() < .5 ? 'rgba(200,120,70,.55)' : 'rgba(255,214,170,.6)';
     g.beginPath(); g.ellipse(X(x), Y(y), (.03 + srnd() * .05) * PPU, (.02 + srnd() * .03) * PPU, srnd() * 3, 0, Math.PI * 2); g.fill();
   }
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GW, GH), new THREE.MeshStandardMaterial({ map: canvasTex(c), roughness: 1, metalness: 0 }));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GW, GH), newMat({ map: canvasTex(c), roughness: 1, metalness: 0 }));
   ground.rotation.x = -Math.PI / 2; ground.position.set(GX0 + GW / 2, 0, GY0 + GH / 2); ground.receiveShadow = true;
   scene.add(ground);
 }
@@ -227,6 +275,28 @@ function grassFree(x, y) {
   for (const [x0, y0, x1, y1] of NO_GRASS) if (x > x0 && x < x1 && y > y0 && y < y1) return false;
   return true;
 }
+// ---------- blob shadows (lite mode instead of shadow maps) ----------
+const STATIC_BLOBS = []; // [x, y, rx, ry]
+const blobs = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(20,40,10,.42)'); gr.addColorStop(.55, 'rgba(20,40,10,.24)'); gr.addColorStop(1, 'rgba(20,40,10,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  const m = new THREE.InstancedMesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, toneMapped: false }), 400);
+  m.frustumCulled = false; m.count = 0; m.position.y = .014; m.renderOrder = 0; m.visible = LITE;
+  scene.add(m); return m;
+})();
+const _b = new THREE.Object3D();
+function drawBlobs(list) {
+  let n = 0;
+  for (const [x, y, rx, ry] of list) {
+    if (n >= 400) break;
+    _b.position.set(x, 0, y); _b.scale.set(rx, 1, ry); _b.updateMatrix(); blobs.setMatrixAt(n++, _b.matrix);
+  }
+  blobs.count = n; blobs.instanceMatrix.needsUpdate = true;
+}
+
 // ---------- ground decals (zones, pads) ----------
 function decal(w, h, x, y, ppu = 110) {
   const c = document.createElement('canvas'); c.width = Math.round(w * ppu); c.height = Math.round(h * ppu);
@@ -367,24 +437,61 @@ const smoke = new THREE.InstancedMesh(new THREE.SphereGeometry(.16, 10, 8), new 
 smoke.frustumCulled = false; scene.add(smoke);
 const _c = new THREE.Color();
 
+// ---------- draw-call reduction: bake material colours into vertex colours and merge ----------
+// Each merged group draws in one call instead of one call per mesh and material (matters a lot on phones).
+function colorAttr(g, mats) {
+  const n = g.attributes.position.count, col = new Float32Array(n * 3), idx = g.index;
+  const groups = g.groups.length ? g.groups : [{ start: 0, count: idx ? idx.count : n, materialIndex: 0 }];
+  for (const gr of groups) {
+    const c = (mats.length === 1 ? mats[0] : mats[gr.materialIndex || 0] || mats[0]).color; // a single material covers every group
+    for (let i = gr.start; i < gr.start + gr.count; i++) { const v = idx ? idx.getX(i) : i; col[v * 3] = c.r; col[v * 3 + 1] = c.g; col[v * 3 + 2] = c.b; }
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.clearGroups();
+}
+function bakeMerge(root, keep = () => false) {
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert(), rel = new THREE.Matrix4();
+  const geos = [], done = [];
+  const kept = (m) => { for (let p = m; p && p !== root; p = p.parent) if (keep(p)) return true; return false; };
+  root.traverse(m => {
+    if (!m.isMesh || m.isSkinnedMesh || m.isInstancedMesh || kept(m)) return;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    if (mats.some(x => x.map || x.transparent || (x.emissive && x.emissive.getHex()))) return;
+    let g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+    for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k);
+    if (!g.attributes.normal) g.computeVertexNormals();
+    colorAttr(g, mats);
+    g.applyMatrix4(rel.multiplyMatrices(inv, m.matrixWorld));
+    geos.push(g); done.push(m);
+  });
+  if (geos.length < 2) return;
+  for (const m of done) m.removeFromParent();
+  const merged = new THREE.Mesh(mergeGeometries(geos), BAKED_MAT);
+  merged.castShadow = merged.receiveShadow = true;
+  root.add(merged);
+}
+
 // ---------- characters ----------
 const CHAR_H = 1.85, HEAD_SCALE = 1.3, CHUNK = 1.14;
 const NOT_CLOTHES = /^(Skin|Skin_Darker|Eye|Eyebrows|Hair.*)$/;
 function makeChar({ model: name, shirt, pants, hair }) {
   const a = A[name], o = SkeletonUtils.clone(a.scene), s = CHAR_H / a.size.y;
   o.scale.setScalar(s);
-  recolorTree(o, () => null);
   o.traverse(m => {
-    if (!m.isMesh) return;
-    const part = /Body/.test(m.name) ? shirt : /Legs|Pants/.test(m.name) ? pants : null;
-    const f = mm => {
-      let c = null;
-      if (hair && /^Hair/.test(mm.name)) c = hair;
-      else if (part && !NOT_CLOTHES.test(mm.name)) c = part;
-      if (!c) return mm; mm = mm.clone(); mm.color.set(c); return mm;
-    };
-    m.material = Array.isArray(m.material) ? m.material.map(f) : f(m.material);
+    if (!m.isSkinnedMesh) return;
     m.frustumCulled = false;
+    const R = m.userData.ranges;
+    if (!R || !(shirt || pants || hair)) return;
+    const g = m.geometry.clone(), col = g.attributes.color.array; // own colours for this character
+    for (const r of R) {
+      const part = /Body/.test(r.mesh) ? shirt : /Legs|Pants/.test(r.mesh) ? pants : null;
+      const c = hair && /^Hair/.test(r.mat) ? hair : part && !NOT_CLOTHES.test(r.mat) ? part : null;
+      if (!c) continue;
+      _c.set(c);
+      for (let i = r.start; i < r.start + r.count; i++) { col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b; }
+    }
+    m.geometry = g;
   });
   const g = new THREE.Group(); g.add(o); scene.add(g); o.scale.x *= CHUNK; o.scale.z *= CHUNK;
   const mixer = new THREE.AnimationMixer(o); mixers.add(mixer);
@@ -438,17 +545,19 @@ const chickenMeshes = [];
 // ---------- static buildings ----------
 // coop: picket fence + hen house model
 {
+  const coopG = new THREE.Group(); scene.add(coopG);
   const f = A.fence2, segLen = f.size.x * (.62 / f.size.y);
   const run = (x0, y0, x1, y1) => {
     const len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.round(len / segLen)), ang = Math.atan2(y1 - y0, x1 - x0);
     for (let i = 0; i < n; i++) {
       const t = (i + .5) / n;
-      const w = model('fence2', .62, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, -ang);
+      const w = model('fence2', .62, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, -ang, coopG);
       w.scale.x = len / n / segLen;
     }
   };
   run(2, 2.8, 7, 2.8); run(2, 2.8, 2, 7); run(7, 2.8, 7, 7); run(2, 7, 3.7, 7); run(5.3, 7, 7, 7);
-  model('coop', 1.9, 3.3, 3.75, 0);
+  model('coop', 1.9, 3.3, 3.75, 0, coopG);
+  bakeMerge(coopG);
 }
 // nest
 mesh(new THREE.CylinderGeometry(.7, .78, .1, 24), '#e3c06c', NEST.x, .05, NEST.y);
@@ -463,6 +572,7 @@ const treeMeshes = trees.map((t, i) => {
   const stump = new THREE.Group(); g.add(stump);
   model('stump', .42, 0, 0, i, stump, { Green: '#7fce4a' });
   const sapling = model('tree1', .9, 0, 0, i, stump, { Green: green });
+  bakeMerge(crown); bakeMerge(stump, m => m === sapling); bakeMerge(sapling);
   return { g, crown, stump, sapling };
 });
 // oven (bakery)
@@ -473,6 +583,7 @@ mesh(new THREE.SphereGeometry(.78, 22, 14, 0, Math.PI * 2, 0, Math.PI / 2), '#d9
 box(ovenG, .3, .9, .3, '#8c4a33', .55, 1.4, -.3);
 const ovenMouth = mesh(new THREE.CircleGeometry(.36, 20, 0, Math.PI), new THREE.MeshLambertMaterial({ color: '#3a2620', emissive: '#000000' }), 0, .12, .81, ovenG);
 box(ovenG, .72, .12, .02, '#3a2620', 0, .06, .81);
+bakeMerge(ovenG, m => m === ovenMouth);
 // oven trays
 const ovenTrays = [OVEN_IN, OVEN_OUT].map(z => box(scene, 1.15, .08, .7, '#b98a52', z.x, .04, z.y));
 // stalls
@@ -489,6 +600,7 @@ function makeStall(st) {
   const scr = rbox(g, .4, .22, .05, '#eafcff', -.8, 1.16, -.14, .02); scr.rotation.x = -.45;
   rbox(g, .32, .04, .2, '#3aa9bc', -.8, 1.09, .1, .015);
   sack(-1.65, .1, .8, .4, g); sack(-1.95, .55, .62, 1.6, g);
+  bakeMerge(g);
   return g;
 }
 const sellZones = new Map(), stallCashiers = new Map();
@@ -510,10 +622,12 @@ function makeBunting() {
   const bushes = [];
   for (let y = 1.5; y < 24.5; y += 3.2) { bushes.push([.2 + srnd() * .4, y + srnd()]); bushes.push([19.6 + srnd() * .4, y + srnd()]); }
   for (let x = 1; x < 19.5; x += 3) bushes.push([x + srnd(), .3 + srnd() * .3]);
-  bushes.forEach(([x, y]) => bush(x, y, .9 + srnd() * .5));
-  model('smallBarn', 2.1, 18.4, 13.2, -.35);
-  model('woodlog', .3, 12.8, 10.6, .7); model('woodlog', .3, 13.2, 10.9, .2);
-  model('crate', .55, 1.6, 17.5, .3); model('crate', .45, 1.9, 18.2, .9);
+  const decor = new THREE.Group(); scene.add(decor);
+  bushes.forEach(([x, y]) => bush(x, y, .9 + srnd() * .5, decor));
+  model('smallBarn', 2.1, 18.4, 13.2, -.35, decor);
+  model('woodlog', .3, 12.8, 10.6, .7, decor); model('woodlog', .3, 13.2, 10.9, .2, decor);
+  model('crate', .55, 1.6, 17.5, .3, decor); model('crate', .45, 1.9, 18.2, .9, decor);
+  bakeMerge(decor);
 }
 for (const p of PADS) NO_GRASS.push([p.x - .95, p.y - .95, p.x + .95, p.y + .95]);
 for (const st of stallList) NO_GRASS.push([st.x - 1.4, st.y - 2.6, st.x + 2.4, st.y + .7]);
@@ -531,8 +645,8 @@ NO_GRASS.push([NEST.x - 1, NEST.y - 1, NEST.x + 1, NEST.y + 1], [8.1, 4.6, 12, 8
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(pos.map((_, i) => i % 3 === 1 ? 1 : 0), 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const N = 2400;
-  const grass = new THREE.InstancedMesh(geo, addWind(new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 })), N);
+  const N = LITE ? 1400 : 2400;
+  const grass = new THREE.InstancedMesh(geo, addWind(newMat({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 })), N);
   grass.receiveShadow = true; grass.frustumCulled = false;
   const greens = ['#6cc43d', '#74ca45', '#66bd39', '#7dcf4d'].map(c => new THREE.Color(c));
   let n = 0;
@@ -544,7 +658,7 @@ NO_GRASS.push([NEST.x - 1, NEST.y - 1, NEST.x + 1, NEST.y + 1], [8.1, 4.6, 12, 8
   }
   grass.count = n; _o.scale.setScalar(1); scene.add(grass);
   // flowers
-  const F = 320, fl = new THREE.InstancedMesh(new THREE.SphereGeometry(.055, 8, 6).translate(0, .16, 0), addWind(new THREE.MeshStandardMaterial({ roughness: .7 })), F);
+  const F = 320, fl = new THREE.InstancedMesh(new THREE.SphereGeometry(.055, 8, 6).translate(0, .16, 0), addWind(newMat({ roughness: .7 })), F);
   const fc = ['#ffffff', '#ffe14d', '#ff8fb8', '#b98cff', '#ffffff'].map(c => new THREE.Color(c));
   let m = 0;
   for (let tries = 0; m < F && tries < F * 6; tries++) {
@@ -584,9 +698,15 @@ function instancedModel(name, spots, colorFor) {
   for (let x = -.5; x < 21; x += 1.6) { add(x + srnd(), -1.2 - srnd() * 1.2); add(x + srnd(), -3.6 - srnd() * 1.5); add(x + srnd(), 29.2 + srnd() * 1.5); }
   const greens = TREE_GREENS.map(c => c);
   const colorFor = (name, tint) => name === 'Green' ? (tint === undefined ? true : greens[tint]) : null;
-  instancedModel('tree3', spots, colorFor);
+  const forest = LITE ? spots.filter((_, i) => i % 2 === 0) : spots;
+  instancedModel('tree3', forest, colorFor);
+  if (LITE) for (const [x, y, h] of forest) STATIC_BLOBS.push([x, y, h * .32, h * .32]);
 }
-const ovenDecor = [model('crate', .5, 8.0, 5.0, .4), model('crate', .42, 7.8, 5.6, 1.1), sack(12.0, 5.2, .7, -.3)];
+const ovenDecor = (() => {
+  const g = new THREE.Group(); scene.add(g);
+  model('crate', .5, 8.0, 5.0, .4, g); model('crate', .42, 7.8, 5.6, 1.1, g); sack(12.0, 5.2, .7, -.3, g);
+  bakeMerge(g); return [g];
+})();
 
 // ---------- input ----------
 let moved = false;
@@ -597,7 +717,7 @@ ov.addEventListener('pointerup', endJoy); ov.addEventListener('pointercancel', e
 addEventListener('keydown', () => { moved = true; });
 
 // ---------- juice: dust puffs and pop-in ----------
-const dust = new THREE.InstancedMesh(new THREE.SphereGeometry(.12, 10, 8), new THREE.MeshStandardMaterial({ color: '#f1d2a8', transparent: true, opacity: .6, roughness: 1 }), 80);
+const dust = new THREE.InstancedMesh(new THREE.SphereGeometry(.12, 10, 8), newMat({ color: '#f1d2a8', transparent: true, opacity: .6, roughness: 1 }), 80);
 dust.frustumCulled = false; scene.add(dust);
 const puffs = []; let puffT = 0;
 function popScale(born) { const t = Math.min(1, (now - born) / .55); if (t >= 1) return 1; const u = t - 1; return Math.max(.01, 1 + 2.70158 * u * u * u + 1.70158 * u * u); }
@@ -709,6 +829,17 @@ function sync() {
   puffs.forEach((p, i) => { const k = (now - p.t) / .5; _o.position.set(p.x, .08 + k * .25, p.y); _o.rotation.set(0, 0, 0); _o.scale.setScalar((.5 + k * 1.1) * (1 - k * k)); _o.updateMatrix(); dust.setMatrixAt(i, _o.matrix); });
   dust.count = puffs.length; dust.instanceMatrix.needsUpdate = true; _o.scale.setScalar(1);
   windTime.value = now; clouds.offset.set(now * .006, now * .003);
+  if (LITE) {
+    const L = STATIC_BLOBS.slice();
+    L.push([3.3, 3.85, 1.25, .95]);
+    if (ovenG.visible) L.push([10, 5.75, 1.35, 1.05]);
+    for (const st of stallList) if (isOpen(st)) L.push([st.x, st.y + .12, 1.45, .7]);
+    for (const a of [player, ...helpers, ...customers]) L.push([a.x, a.y, .42, .42]);
+    for (const a of stallCashiers.values()) if (people.has(a)) L.push([a.x, a.y, .42, .42]);
+    chickens.forEach(c => L.push([c.x, c.y, .28, .28]));
+    if (G.bought.has('grove')) for (const t of trees) if (t.logs > 0) L.push([t.x, t.y + .08, .75, .75]);
+    drawBlobs(L);
+  }
 
   // particles
   let nc = 0, ns = 0;
@@ -880,11 +1011,16 @@ function overlay(U) {
   }
 }
 
+const perf = { upd: 0, sync: 0, draw: 0, calls: 0, tris: 0 };
+const ema = (k, v) => { perf[k] += (v - perf[k]) * .1; };
 function render(dt = 0) {
+  let t0 = performance.now();
   sync();
+  ema('sync', performance.now() - t0); t0 = performance.now();
   for (const m of mixers) m.update(dt);
   for (const p of people.values()) if (p.head) p.head.scale.setScalar(HEAD_SCALE);
   if (useFx) composer.render(dt); else renderer.render(scene, camera);
+  ema('draw', performance.now() - t0); perf.calls = renderer.info.render.calls; perf.tris = renderer.info.render.triangles;
   const a = proj(camX, camY), b = proj(camX + 1, camY);
   overlay(Math.hypot(b[0] - a[0], b[1] - a[1]));
 }
@@ -918,8 +1054,9 @@ function frame(t) {
   const dt = Math.min(.1, raw); last = t; // up to 10 fps the game still runs in real time
   try {
     if (t - started > 1500 && raw < .5) watchPerf(raw);
-    update(dt);
+    const t0 = performance.now(); update(dt); ema('upd', performance.now() - t0);
     render(dt);
+    if (DEBUG) { o.font = '12px system-ui'; o.fillStyle = '#000'; o.fillText(`${Math.round(fpsEma)} fps · js ${perf.upd.toFixed(1)}+${perf.sync.toFixed(1)} ms · gl ${perf.draw.toFixed(1)} ms · ${perf.calls} calls · ${Math.round(perf.tris / 1000)}k tris · dpr ${DPR}${useFx ? ' · ao' : ''}`, 8, H - 50); }
   } catch (e) {
     if (!lastError) console.error(e);
     lastError = String(e && e.message || e);
@@ -929,6 +1066,6 @@ function frame(t) {
   }
 }
 requestAnimationFrame(frame);
-window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, fx: () => useFx };
+window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, scene, gfx: GFX, fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }) };
 document.getElementById('loading')?.remove();
 uiInit(resumed);

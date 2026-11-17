@@ -56,6 +56,8 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 #pauseBtn{position:fixed;top:calc(14px + env(safe-area-inset-top));right:12px;z-index:2;width:46px;height:46px;border:0;border-radius:23px;background:rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;touch-action:manipulation}
 #pauseBtn[hidden]{display:none}
 #pauseBtn i{width:6px;height:18px;border-radius:2px;background:#fff}
+
+.gfx{margin-top:14px;font-size:15px;color:#6d675a;display:flex;align-items:center;justify-content:center;gap:8px}.gfx .btn.on{background:#4cbb45;color:#fff;box-shadow:0 3px 0 #2f8c2c}
 #pauseFps{font-size:12px;color:#a19b8a;margin-top:10px}
 </style>
 </head>
@@ -82,6 +84,7 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
   <ul id="pauseGoals" class="goals"></ul>
   <button id="pauseResume" class="btn wide">Продолжить</button>
   <div class="row" style="margin-top:10px"><button id="pauseRestart" class="btn alt">Заново</button><button id="pauseMenu" class="btn alt">Меню</button></div>
+  <div class="gfx">Графика: <button id="gfxLite" class="btn small alt">Быстрая</button><button id="gfxFull" class="btn small alt">Красивая</button></div>
   <div id="pauseFps"></div>
 </div></div>
 <div id="result" class="screen" hidden><div class="card">
