@@ -19,7 +19,8 @@ const QUALITY = new URLSearchParams(location.search).get('q'); // 'low' | 'high'
 const glCanvas = document.getElementById('gl');
 const ov = document.getElementById('ov'), o = ov.getContext('2d');
 const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, powerPreference: 'high-performance' });
-let DPR = Math.min(2, devicePixelRatio || 1);
+const MOBILE = matchMedia('(pointer: coarse)').matches;
+let DPR = Math.min(QUALITY === 'high' ? 2 : MOBILE ? 1.5 : 2, devicePixelRatio || 1);
 renderer.setPixelRatio(DPR);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -40,7 +41,7 @@ ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 5, rings: 
 ao.blendIntensity = .95;
 composer.addPass(ao);
 composer.addPass(new OutputPass());
-let useFx = QUALITY !== 'low';
+let useFx = QUALITY === 'high' || (QUALITY !== 'low' && !MOBILE); // AO is too heavy for most phones
 let W = 0, H = 0, camDist = 20;
 function resize() {
   W = innerWidth; H = innerHeight;
@@ -624,6 +625,7 @@ function sync() {
 
   // chickens
   while (chickenMeshes.length < chickens.length) chickenMeshes.push(makeChicken());
+  chickenMeshes.forEach((m, i) => { m.g.visible = i < chickens.length; if (!m.g.visible) born.delete(m.g); });
   chickens.forEach((c, i) => {
     const m = chickenMeshes[i];
     m.g.position.set(c.x, 0, c.y); popIn(m.g);
@@ -649,7 +651,7 @@ function sync() {
 
   // buildings that appear when bought
   ovenG.visible = G.bought.has('oven');
-  if (ovenG.visible) popIn(ovenG);
+  if (ovenG.visible) popIn(ovenG); else born.delete(ovenG);
   for (const d of ovenDecor) d.visible = ovenG.visible;
   ovenMouth.material.emissive.set(oven.cook > 0 ? '#ff8a20' : '#000000');
   ovenMouth.material.emissiveIntensity = .8 + Math.sin(now * 12) * .2;
@@ -658,11 +660,12 @@ function sync() {
   for (const st of stallList) {
     const open = isOpen(st);
     if (open && !stallMeshes.has(st)) stallMeshes.set(st, makeStall(st));
-    if (open) popIn(stallMeshes.get(st));
+    if (stallMeshes.has(st)) { const m = stallMeshes.get(st); m.visible = open; if (open) popIn(m); else born.delete(m); }
     if (open && !sellZones.has(st)) sellZones.set(st, zoneDecal(st.drop.x, st.drop.y, 'ПРОДАЖА'));
-    if (sellZones.has(st)) sellZones.get(st).draw(!hasCashier(st) && near(player, st.drop.x, st.drop.y, .95), !hasCashier(st));
+    if (sellZones.has(st)) { const z = sellZones.get(st); z.m.visible = open; if (open) z.draw(!hasCashier(st) && near(player, st.drop.x, st.drop.y, .95), !hasCashier(st)); }
   }
   if (G.won && !bunting) bunting = makeBunting();
+  if (bunting) bunting.visible = G.won;
 
   // pads
   for (const d of padDecals.values()) d.m.visible = false;
@@ -758,6 +761,14 @@ function patienceBar(x, y, w, f) {
   rr(o, x - w / 2, y, w, 7, 3.5); o.fillStyle = 'rgba(0,0,0,.35)'; o.fill();
   rr(o, x - w / 2, y, w * f, 7, 3.5); o.fillStyle = f > .5 ? '#6ad44f' : f > .25 ? '#f4b52c' : '#ec4a3c'; o.fill();
 }
+function goalIconHud(g, x, y) {
+  if (g.k === 'sell') return itemIcon(g.t, x, y, 26);
+  if (g.k === 'bake') return itemIcon('pie', x, y, 26);
+  if (g.k === 'earn') return cashIcon(o, x, y, 50);
+  if (g.k === 'rep') return star(x, y, 10, '#ffd23f');
+  if (g.k === 'serve') { o.fillStyle = '#8fb8ff'; o.beginPath(); o.arc(x, y - 4, 5, 0, Math.PI * 2); o.fill(); o.beginPath(); o.ellipse(x, y + 7, 8, 6, 0, Math.PI, 0); o.fill(); return; }
+  o.fillStyle = '#ff7a6b'; o.beginPath(); o.moveTo(x - 9, y); o.lineTo(x, y - 8); o.lineTo(x + 9, y); o.lineTo(x + 9, y + 8); o.lineTo(x - 9, y + 8); o.closePath(); o.fill();
+}
 function overlay(U) {
   o.clearRect(0, 0, W, H);
   // customers: dark bubble with item and count (front of queue), bars for others
@@ -812,27 +823,54 @@ function overlay(U) {
     }
   }
   // HUD
-  const top = 14;
+  if (G.level < 0) return;
+  const top = 14, L = LV();
   o.font = `900 26px ${FONT}`;
   const cw = o.measureText(G.coins).width;
   rr(o, 12, top, cw + 70, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
   cashIcon(o, 38, top + 22, 70);
   text(String(G.coins), 64, top + 23, 26, '#fff', 'rgba(0,0,0,0)', 0, 'left');
-  const sx0 = W - 12 - 5 * 24 - 16;
-  rr(o, sx0, top, 5 * 24 + 16, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
+  // timer: colour of the medal still reachable, bar = time left for it
+  const t = G.time, medal = t <= L.gold ? ['#ffcc29', L.gold, 0] : t <= L.silver ? ['#d3dbe3', L.silver, L.gold] : ['#d08a4e', 0, 0];
+  const tw = 108, tx = W / 2 - tw / 2;
+  rr(o, tx, top, tw, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
+  o.beginPath(); o.arc(tx + 22, top + 22, 9, 0, Math.PI * 2); o.fillStyle = medal[0]; o.fill();
+  text(fmtClock(t), tx + 38, top + 23, 22, '#fff', 'rgba(0,0,0,0)', 0, 'left');
+  if (medal[1]) {
+    const f = Math.max(0, (medal[1] - t) / (medal[1] - medal[2]));
+    rr(o, tx + 14, top + 38, (tw - 28), 4, 2); o.fillStyle = 'rgba(255,255,255,.2)'; o.fill();
+    rr(o, tx + 14, top + 38, (tw - 28) * f, 4, 2); o.fillStyle = medal[0]; o.fill();
+  }
+  // goals
+  const chips = L.goals.map(g => {
+    const [c, n] = goalProgress(g);
+    const label = g.k === 'build' ? (c ? '✓' : '0/1') : g.k === 'rep' ? String(c).replace('.', ',') + '/' + String(n).replace('.', ',') : Math.min(c, n) + '/' + n;
+    o.font = `900 16px ${FONT}`;
+    return { g, done: c >= n, label, w: 44 + o.measureText(label).width };
+  });
+  const gap = 6, total = chips.reduce((a, c) => a + c.w, 0) + gap * (chips.length - 1);
+  let cx = W / 2 - total / 2;
+  for (const c of chips) {
+    rr(o, cx, top + 52, c.w, 32, 16); o.fillStyle = c.done ? 'rgba(76,187,69,.92)' : 'rgba(0,0,0,.32)'; o.fill();
+    goalIconHud(c.g, cx + 18, top + 68);
+    text(c.label, cx + 34, top + 69, 16, '#fff', 'rgba(0,0,0,0)', 0, 'left');
+    cx += c.w + gap;
+  }
+  // customer rating (affects how many come) — small, bottom left
+  const by = H - 26 - 8;
   for (let i = 0; i < 5; i++) {
-    const cx = sx0 + 20 + i * 24, cy = top + 22;
-    star(cx, cy, 11, 'rgba(255,255,255,.3)');
+    const sx = 18 + i * 20;
+    star(sx, by, 8, 'rgba(0,0,0,.25)');
     const fl = Math.max(0, Math.min(1, G.rep - i));
-    if (fl > 0) { o.save(); o.beginPath(); o.rect(cx - 11, cy - 11, 22 * fl, 22); o.clip(); star(cx, cy, 11, '#ffd23f'); o.restore(); }
+    if (fl > 0) { o.save(); o.beginPath(); o.rect(sx - 8, by - 8, 16 * fl, 16); o.clip(); star(sx, by, 8, '#ffd23f'); o.restore(); }
   }
   if (h && h.text) {
     o.font = `900 17px ${FONT}`;
-    const tw = o.measureText(h.text).width;
-    rr(o, W / 2 - tw / 2 - 18, top + 56, tw + 36, 38, 19); o.fillStyle = 'rgba(25,30,45,.6)'; o.fill();
-    text(h.text, W / 2, top + 76, 17, '#fff', 'rgba(0,0,0,0)', 0);
+    const hw = o.measureText(h.text).width;
+    rr(o, W / 2 - hw / 2 - 18, top + 92, hw + 36, 38, 19); o.fillStyle = 'rgba(25,30,45,.6)'; o.fill();
+    text(h.text, W / 2, top + 112, 17, '#fff', 'rgba(0,0,0,0)', 0);
   }
-  if (!moved && G.hint === 0) text('ВЕДИ ПАЛЬЦЕМ', W / 2, H * .9, Math.min(36, W * .085), '#ffffff', '#1d3557', 7);
+  if (!moved && G.hint === 0 && G.level === 0) text('ВЕДИ ПАЛЬЦЕМ', W / 2, H * .9, Math.min(36, W * .085), '#ffffff', '#1d3557', 7);
   if (joy) {
     o.beginPath(); o.arc(joy.ox, joy.oy, JOY_R, 0, Math.PI * 2); o.fillStyle = 'rgba(255,255,255,.22)'; o.fill();
     o.lineWidth = 4; o.strokeStyle = 'rgba(255,255,255,.75)'; o.stroke();
@@ -852,31 +890,35 @@ function render(dt = 0) {
 }
 
 // ---------- loop ----------
-load();
-camX = clamp(player.x, 4, MAP_W - 4); camY = clamp(player.y, 5, MAP_H - 6);
-const win = document.getElementById('win');
+const resumed = load();
 let last = performance.now();
-// automatic quality: if the first seconds run slowly, drop the AO pass, then the pixel ratio
-let perfT = 0, perfN = 0, perfStage = QUALITY ? 9 : 0;
-function watchPerf(rawDt) {
-  if (perfStage > 1) return;
-  perfT += rawDt; perfN++;
-  if (perfT < 2.5) return;
-  const fps = perfN / perfT; perfT = 0; perfN = 0;
-  if (fps < 45) {
-    if (perfStage === 0 && useFx) useFx = false;
-    else if (DPR > 1.3) { DPR = 1.3; renderer.setPixelRatio(DPR); resize(); }
-    perfStage++;
-  } else perfStage = 9;
+// automatic quality: while the game runs slowly, step down: AO off -> lower resolution -> smaller shadows -> lowest resolution
+let perfT = 0, perfN = 0, perfStage = QUALITY ? 9 : 0, fpsEma = 60;
+function lowerQuality() {
+  if (useFx) { useFx = false; return true; }
+  if (DPR > 1.25) { DPR = 1.25; renderer.setPixelRatio(DPR); resize(); return true; }
+  if (sun.shadow.mapSize.x > 1024) { sun.shadow.mapSize.set(1024, 1024); sun.shadow.map?.dispose(); sun.shadow.map = null; return true; }
+  if (DPR > 1) { DPR = 1; renderer.setPixelRatio(DPR); resize(); return true; }
+  return false;
 }
-let lastError = null;
+function watchPerf(raw) {
+  if (raw > 0 && raw < .5) fpsEma += (1 / raw - fpsEma) * .05;
+  window.__fps = fpsEma;
+  if (perfStage > 8 || document.hidden) return;
+  perfT += raw; perfN++;
+  if (perfT < 2) return;
+  const fps = perfN / perfT; perfT = 0; perfN = 0;
+  if (fps < 45 && lowerQuality()) perfStage++;
+  else if (fps >= 45 || perfStage > 3) perfStage = 9;
+}
+let lastError = null, started = performance.now();
 function frame(t) {
   requestAnimationFrame(frame); // first, so one bad frame cannot stop the game
   const raw = (t - last) / 1000;
-  const dt = Math.min(.05, raw); last = t;
+  const dt = Math.min(.1, raw); last = t; // up to 10 fps the game still runs in real time
   try {
-    if (now > 1) watchPerf(raw);
-    if (win.hidden) update(dt);
+    if (t - started > 1500 && raw < .5) watchPerf(raw);
+    update(dt);
     render(dt);
   } catch (e) {
     if (!lastError) console.error(e);
@@ -887,5 +929,6 @@ function frame(t) {
   }
 }
 requestAnimationFrame(frame);
-window.__game = { G, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, ready: true, fx: () => useFx };
+window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, fx: () => useFx };
 document.getElementById('loading')?.remove();
+uiInit(resumed);

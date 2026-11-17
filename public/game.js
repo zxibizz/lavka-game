@@ -1,6 +1,6 @@
 'use strict';
 // Bump together with VERSION in sw.js whenever anything in public/ changes.
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 // Game state and simulation. No rendering here: view.js draws the world.
 let camX = 10, camY = 14;
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -14,14 +14,15 @@ const NEST = { x: 4.5, y: 7.9 };
 const OVEN_IN = { x: 8.8, y: 7.7 }, OVEN_OUT = { x: 11.2, y: 7.7 };
 const ROAD_Y = 26.5;
 
-const G = { coins: 0, coinsEver: 0, rep: 3, bought: new Set(['eggStall']), padPaid: {}, time: 0, won: false, hint: 0, hintT: 0, spawnT: 2, served: 0 };
+const G = { level: -1, done: false, coins: 0, coinsEver: 0, rep: 3, bought: new Set(['eggStall']), padPaid: {}, time: 0, won: false, hint: 0, hintT: 0, spawnT: 2, served: 0,
+  sold: { egg: 0, wood: 0, pie: 0 }, earned: 0, baked: 0 };
 let now = 0;
 
 function mkActor(x, y, kind) {
   return { x, y, vx: 0, vy: 0, face: 1, dir: Math.PI / 2, stack: [], cap: 6, walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, tx: 0, chopT: 0, chopping: 0, kind };
 }
 const player = mkActor(10, 13.5, 'player');
-player.speed = 4.4;
+player.speed = 5.2;
 
 function mkStall(type, id, x) {
   return { type, id, x, y: 19, shelf: 0, max: 14, coins: 0, queue: [], t: 0,
@@ -67,7 +68,114 @@ const PADS = [
   { id: 'fair', x: 10, y: 14.0, cost: 500, label: 'Ярмарка', icon: 'flag', req: ['helper2', 'bag2', 'chick4', 'boots', 'cashEgg', 'cashWood', 'cashPie'] },
 ];
 PADS.forEach(p => { p.stand = 0; p.payT = 0; p.pop = 0; });
-const padVisible = p => !G.bought.has(p.id) && p.req.every(r => G.bought.has(r));
+
+// ---------- levels (missions) and meta progression ----------
+// A level starts from a fresh farm: `start` is already built, only `pads` can be bought.
+// Stars by time: <= gold -> 3, <= silver -> 2, otherwise 1. A level cannot be lost.
+// gold/silver come from bot runs (test/calibrate.mjs): gold ~ 1.3x the bot, silver ~ 1.7x gold.
+const ALL_PADS = PADS.map(p => p.id);
+const LEVELS = [
+  { title: 'Первые яйца', start: ['eggStall'], pads: ['chick2'], goals: [{ k: 'sell', t: 'egg', n: 10 }], reward: 10, gold: 50, silver: 85 },
+  { title: 'Свой продавец', start: ['eggStall'], pads: ['chick2', 'cashEgg', 'chick3'], goals: [{ k: 'earn', n: 70 }, { k: 'build', id: 'cashEgg' }], reward: 14, gold: 95, silver: 160 },
+  { title: 'Дрова на продажу', start: ['eggStall'], coins: 15, pads: ['chick2', 'grove', 'woodStall', 'bag1'], goals: [{ k: 'sell', t: 'wood', n: 12 }, { k: 'sell', t: 'egg', n: 12 }], reward: 18, gold: 160, silver: 270 },
+  { title: 'Довольные покупатели', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'cashEgg', 'bag1'], goals: [{ k: 'serve', n: 20 }, { k: 'rep', n: 4.5 }], pat: .85, reward: 22, gold: 120, silver: 205 },
+  { title: 'Большая корзина', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'bag1', 'boots', 'cashEgg', 'cashWood'], goals: [{ k: 'earn', n: 180 }], reward: 26, gold: 165, silver: 280 },
+  { title: 'Пекарня', start: ['eggStall', 'grove', 'woodStall'], coins: 30, pads: ['chick2', 'oven', 'cashEgg', 'bag1'], goals: [{ k: 'build', id: 'oven' }, { k: 'bake', n: 6 }], reward: 30, gold: 150, silver: 255 },
+  { title: 'Пироги к чаю', start: ['eggStall', 'grove', 'woodStall', 'oven'], pads: ['pieStall', 'cashPie', 'chick2', 'chick3', 'bag1'], goals: [{ k: 'sell', t: 'pie', n: 8 }, { k: 'serve', n: 20 }], reward: 34, gold: 375, silver: 640 },
+  { title: 'Помощник', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall'], pads: ['helper', 'chick2', 'chick3', 'bag1', 'cashEgg'], goals: [{ k: 'build', id: 'helper' }, { k: 'earn', n: 300 }], reward: 38, gold: 245, silver: 415 },
+  { title: 'Спешка', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'cashEgg', 'cashWood', 'bag1', 'boots'], goals: [{ k: 'earn', n: 250 }], rate: 1.5, pat: .7, reward: 42, gold: 220, silver: 375 },
+  { title: 'Только пироги', start: ['pieStall', 'grove', 'oven'], pads: ['chick2', 'chick3', 'chick4', 'cashPie', 'bag1', 'helper2'], goals: [{ k: 'bake', n: 15 }, { k: 'sell', t: 'pie', n: 12 }], reward: 46, gold: 120, silver: 205 },
+  { title: 'Ярмарочный день', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall', 'chick2'], pads: ['chick3', 'chick4', 'cashEgg', 'cashWood', 'cashPie', 'helper', 'bag1', 'boots'], goals: [{ k: 'sell', t: 'egg', n: 30 }, { k: 'sell', t: 'wood', n: 20 }, { k: 'sell', t: 'pie', n: 12 }], rate: 1.3, reward: 52, gold: 500, silver: 850 },
+  { title: 'Без продавцов', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'bag1', 'boots', 'helper'], goals: [{ k: 'serve', n: 40 }, { k: 'rep', n: 4 }], rate: 1.3, reward: 56, gold: 220, silver: 375 },
+  { title: 'Большой заказ', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'chick4', 'bag1', 'bag2', 'boots', 'cashEgg', 'cashWood', 'helper', 'helper2'], goals: [{ k: 'sell', t: 'egg', n: 50 }, { k: 'sell', t: 'wood', n: 45 }], reward: 60, gold: 285, silver: 485 },
+  { title: 'Строгие гости', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall'], pads: ['chick2', 'chick3', 'cashEgg', 'cashWood', 'cashPie', 'bag1', 'boots', 'helper'], goals: [{ k: 'serve', n: 45 }, { k: 'rep', n: 4.5 }], rate: 1.3, pat: .75, reward: 66, gold: 510, silver: 865 },
+  { title: 'Ярмарка', start: ['eggStall'], pads: ALL_PADS, goals: [{ k: 'build', id: 'fair' }], reward: 80, gold: 820, silver: 1395 },
+];
+const LV = () => LEVELS[Math.max(0, G.level)];
+const GOAL_ICON = { sell: g => g.t, earn: () => 'coin', bake: () => 'pie', serve: () => 'person', build: () => 'build', rep: () => 'star' };
+function goalProgress(g) {
+  if (g.k === 'sell') return [G.sold[g.t], g.n];
+  if (g.k === 'earn') return [G.earned, g.n];
+  if (g.k === 'bake') return [G.baked, g.n];
+  if (g.k === 'serve') return [G.served, g.n];
+  if (g.k === 'build') return [G.bought.has(g.id) ? 1 : 0, 1];
+  if (g.k === 'rep') return [Math.floor(G.rep * 10) / 10, g.n];
+  return [0, 1];
+}
+const goalDone = g => { const [c, n] = goalProgress(g); return c >= n; };
+function goalText(g) {
+  const item = { egg: 'яйца', wood: 'дрова', pie: 'пироги' };
+  if (g.k === 'sell') return `Продай ${item[g.t]}: ${g.n}`;
+  if (g.k === 'earn') return `Заработай ${g.n} монет`;
+  if (g.k === 'bake') return `Испеки пироги: ${g.n}`;
+  if (g.k === 'serve') return `Обслужи покупателей: ${g.n}`;
+  if (g.k === 'build') return `Построй: ${PADS.find(p => p.id === g.id).label}`;
+  if (g.k === 'rep') return `Рейтинг ${String(g.n).replace('.', ',')} звезды`;
+  return '';
+}
+
+const UPGRADES = [
+  { id: 'bag', title: 'Большая корзина', text: '+1 место в корзине' },
+  { id: 'speed', title: 'Лёгкие кроссовки', text: 'ходишь на 6% быстрее' },
+  { id: 'hens', title: 'Отборный корм', text: 'куры несутся на 8% чаще' },
+  { id: 'oven', title: 'Жаркая печь', text: 'пироги пекутся на 12% быстрее' },
+  { id: 'patience', title: 'Скамейка у прилавка', text: 'покупатели ждут на 10% дольше' },
+  { id: 'start', title: 'Копилка', text: '+10 монет в начале уровня' },
+];
+const UPGRADE_COST = [15, 30, 50, 80, 120];
+const UPGRADE_MAX = UPGRADE_COST.length;
+const META = { bank: 0, stars: {}, best: {}, up: {} };
+const up = id => META.up[id] || 0;
+const META_KEY = 'lavka-meta-v1', RUN_KEY = 'lavka-run-v1';
+function saveMeta() { try { localStorage.setItem(META_KEY, JSON.stringify(META)); } catch (e) {} }
+function loadMeta() {
+  try { const d = JSON.parse(localStorage.getItem(META_KEY)); if (d) Object.assign(META, d); } catch (e) {}
+  try { localStorage.removeItem('lavka-proto-v1'); } catch (e) {} // pre-levels prototype save
+}
+function upgradeCost(id) { return up(id) < UPGRADE_MAX ? UPGRADE_COST[up(id)] : null; }
+function buyUpgrade(id) {
+  const c = upgradeCost(id);
+  if (c === null || META.bank < c) return false;
+  META.bank -= c; META.up[id] = up(id) + 1; saveMeta();
+  return true;
+}
+const levelUnlocked = i => i === 0 || (META.stars[i - 1] || 0) > 0;
+const totalStars = () => Object.values(META.stars).reduce((a, b) => a + b, 0);
+function medalTimes(i) { const L = LEVELS[i]; return { gold: L.gold, silver: L.silver }; }
+function starsFor(i, t) { const { gold, silver } = medalTimes(i); return t <= gold ? 3 : t <= silver ? 2 : 1; }
+
+function resetWorld() {
+  const L = LV();
+  Object.assign(G, { done: false, coins: (L.coins || 0) + up('start') * 10, coinsEver: 0, rep: 3, bought: new Set(L.start), padPaid: {}, time: 0, won: false,
+    hint: G.level === 0 && !META.stars[0] ? 0 : 5, hintT: 0, spawnT: 2, served: 0, sold: { egg: 0, wood: 0, pie: 0 }, earned: 0, baked: 0 });
+  for (const st of stallList) { st.shelf = 0; st.coins = 0; st.queue.length = 0; st.t = 0; }
+  Object.assign(coop, { eggs: 4, t: 0 }); chickens.length = 0;
+  for (const t of trees) Object.assign(t, { logs: 3, regrow: 0, shake: 0, pop: 0 });
+  Object.assign(oven, { egg: 0, wood: 0, pies: 0, cook: 0 });
+  customers.length = 0; helpers.length = 0; flyers.length = 0; floats.length = 0; parts.length = 0;
+  for (const p of PADS) { p.stand = 0; p.payT = 0; }
+  Object.assign(player, { x: 10, y: 13.5, vx: 0, vy: 0, dir: Math.PI / 2, stack: [], walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, tx: 0, chopT: 0, chopping: 0 });
+  camX = clamp(player.x, 4, MAP_W - 4); camY = clamp(player.y, 5, MAP_H - 6);
+  derive();
+}
+function startLevel(i) { G.level = i; resetWorld(); save(); }
+function quitLevel() { G.level = -1; G.done = false; try { localStorage.removeItem(RUN_KEY); } catch (e) {} }
+function finishLevel() {
+  G.done = true;
+  const i = G.level, t = G.time, stars = starsFor(i, t), first = !META.stars[i];
+  const reward = Math.round(LEVELS[i].reward * stars * (first ? 1 : .5));
+  META.stars[i] = Math.max(META.stars[i] || 0, stars);
+  META.best[i] = Math.min(META.best[i] ?? Infinity, Math.round(t));
+  META.bank += reward;
+  saveMeta();
+  try { localStorage.removeItem(RUN_KEY); } catch (e) {}
+  const result = { level: i, time: t, stars, reward, first, best: META.best[i], hasNext: i + 1 < LEVELS.length };
+  if (typeof onLevelDone === 'function') onLevelDone(result);
+  return result;
+}
+
+const inLevel = id => LV().pads.includes(id) || LV().start.includes(id);
+const padVisible = p => !G.bought.has(p.id) && LV().pads.includes(p.id) && p.req.every(r => G.bought.has(r) || !inLevel(r));
 const padPaid = p => G.padPaid[p.id] || 0;
 
 // solid obstacles (axis-aligned rects), active depending on what is built
@@ -138,8 +246,8 @@ function coinPos(st, i) {
 
 // ---------- derived state & buying ----------
 function derive() {
-  player.cap = 6 + (G.bought.has('bag1') ? 4 : 0) + (G.bought.has('bag2') ? 6 : 0);
-  player.speed = G.bought.has('boots') ? 5.8 : 4.4;
+  player.cap = 6 + up('bag') + (G.bought.has('bag1') ? 4 : 0) + (G.bought.has('bag2') ? 6 : 0);
+  player.speed = (G.bought.has('boots') ? 6.8 : 5.2) * (1 + .06 * up('speed'));
   coop.n = 1 + ['chick2', 'chick3', 'chick4'].filter(id => G.bought.has(id)).length;
   coop.max = 8 + coop.n * 4;
   while (chickens.length < coop.n) addChicken();
@@ -158,7 +266,7 @@ function buy(p) {
   burst(p.x, p.y, .3, ['#ffd84d', '#ff7a59', '#7ed0ff', '#ffffff', '#9be15d'], 30);
   floatText(p.x, p.y, 1.2, p.label + '!', '#fff');
   if (p.id === 'grove') trees.forEach((t, i) => { t.logs = 3; t.regrow = 0; t.pop = now + i * .07; });
-  if (p.id === 'fair') { G.won = true; showWin(); }
+  if (p.id === 'fair') G.won = true;
   save();
 }
 
@@ -201,6 +309,7 @@ function walkTo(a, x, y, dt) {
 }
 
 function update(dt) {
+  if (G.level < 0 || G.done || G.paused) return;
   now += dt; G.time += dt;
   // player movement
   let ix = 0, iy = 0;
@@ -225,6 +334,7 @@ function update(dt) {
   playerInteract(dt);
   updatePads(dt);
   G.curHint = hint();
+  if (LV().goals.every(goalDone)) finishLevel();
 
   for (let i = flyers.length - 1; i >= 0; i--) { const f = flyers[i]; f.age += dt; if (f.age >= f.dur) flyers.splice(i, 1); }
   for (let i = floats.length - 1; i >= 0; i--) { floats[i].t += dt; if (floats[i].t > 1.1) floats.splice(i, 1); }
@@ -235,9 +345,10 @@ function update(dt) {
 }
 
 function updateCoop(dt) {
+  const period = 3.2 * (1 - .08 * up('hens'));
   coop.t += dt * coop.n;
-  while (coop.t >= 3.2) {
-    coop.t -= 3.2;
+  while (coop.t >= period) {
+    coop.t -= period;
     if (coop.eggs < coop.max) {
       coop.eggs++;
       const c = chickens[Math.floor(Math.random() * chickens.length)];
@@ -263,20 +374,20 @@ function updateOven(dt) {
   if (oven.cook > 0) {
     oven.cook -= dt;
     if (Math.random() < dt * 6) parts.push({ x: 10.65 + rnd(-.05, .05), y: 5.15, z: 1.7, vx: rnd(-.1, .3), vy: 0, vz: 1.2, life: 1.2, c: 'smoke' });
-    if (oven.cook <= 0) { oven.pies++; fly('pie', [10, 6.4, .4], pilePos(OVEN_OUT.x, OVEN_OUT.y, oven.pies - 1, ITEM.pie.h), .35); }
+    if (oven.cook <= 0) { oven.pies++; G.baked++; fly('pie', [10, 6.4, .4], pilePos(OVEN_OUT.x, OVEN_OUT.y, oven.pies - 1, ITEM.pie.h), .35); }
   } else if (oven.egg > 0 && oven.wood > 0 && oven.pies < oven.outMax) {
-    oven.egg--; oven.wood--; oven.cook = 2.4;
+    oven.egg--; oven.wood--; oven.cook = 2.4 * (1 - .12 * up('oven'));
   }
 }
 
-function priceOf(t) { return Math.round(ITEM[t].price * (G.won ? 1.5 : 1)); }
+function priceOf(t) { return ITEM[t].price; }
 function updateStalls(dt) {
   for (const st of stallList) {
     if (!isOpen(st)) continue;
     st.t -= dt;
     const c = st.queue[0];
     if (c && c.arrived && c.got < c.want && st.shelf > 0 && st.t <= 0 && isSelling(st)) {
-      st.shelf--; c.got++; st.t = .3;
+      st.shelf--; c.got++; st.t = .3; G.sold[st.type]++;
       fly(st.type, shelfPos(st, st.shelf), [c.x, c.y, 1.0], .25);
       if (c.got >= c.want) {
         let pay = c.want * priceOf(st.type);
@@ -308,7 +419,7 @@ function spawnCustomer() {
   const st = open[0];
   const want = st.type === 'pie' ? 1 + Math.floor(Math.random() * 2) : 1 + Math.floor(Math.random() * 3);
   const fromLeft = Math.random() < .5;
-  const patMax = 45 - Math.min(12, G.served * .08);
+  const patMax = (45 - Math.min(12, G.served * .08)) * (LV().pat || 1) * (1 + .1 * up('patience'));
   const c = { x: fromLeft ? -1.5 : MAP_W + 1.5, y: ROAD_Y, vx: 0, vy: 0, face: fromLeft ? 1 : -1, dir: fromLeft ? 0 : Math.PI, walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, stack: [], id: Math.random(),
     speed: 2.3, stall: st.type, want, got: 0, pat: patMax, patMax, state: 'in', arrived: false,
     shirt: SHIRTS[Math.floor(Math.random() * SHIRTS.length)], hair: HAIR[Math.floor(Math.random() * HAIR.length)], entered: false };
@@ -319,7 +430,7 @@ function updateCustomers(dt) {
   G.spawnT -= dt;
   if (G.spawnT <= 0) {
     spawnCustomer();
-    G.spawnT = 5.5 * (3 / G.rep) / Math.pow(openN, .75) * (G.won ? .6 : 1) * rnd(.7, 1.3);
+    G.spawnT = 5.5 * (3 / G.rep) / Math.pow(openN, .75) / (LV().rate || 1) * rnd(.7, 1.3);
   }
   for (let i = customers.length - 1; i >= 0; i--) {
     const c = customers[i];
@@ -385,7 +496,7 @@ function playerInteract(dt) {
   // coins: collect quickly in chunks
   for (const st of stallList) if (isOpen(st) && st.coins > 0 && near(a, st.cz.x, st.cz.y, 1)) {
     const chunk = Math.max(1, Math.ceil(st.coins / 6));
-    st.coins -= chunk; G.coins += chunk; G.coinsEver += chunk;
+    st.coins -= chunk; G.coins += chunk; G.coinsEver += chunk; G.earned += chunk;
     fly('coin', coinPos(st, st.coins), () => [player.x, player.y, 1.2], .3);
   }
 }
@@ -489,6 +600,7 @@ function hint() {
   if (G.hint === 3) {
     if (G.bought.has('chick2')) { G.hint = 4; G.hintT = now; }
     const p = PADS[0];
+    if (!padVisible(p)) { G.hint = 5; return null; }
     if (G.coins + padPaid(p) < p.cost) return { text: 'Копи монеты: курица стоит ' + p.cost };
     return { x: p.x, y: p.y, text: 'Встань на площадку — купишь курицу' };
   }
@@ -506,17 +618,23 @@ function hint() {
 }
 
 // ---------- save / load ----------
-const SAVE_KEY = 'lavka-proto-v1';
+// META (stars, savings, upgrades) is saved on every change; the level in progress — every 2 s.
 function save() {
-  const d = { coins: G.coins, coinsEver: G.coinsEver, rep: G.rep, bought: [...G.bought], padPaid: G.padPaid, time: G.time, won: G.won, hint: G.hint, served: G.served,
+  if (G.level < 0 || G.done) return;
+  const d = { level: G.level, coins: G.coins, coinsEver: G.coinsEver, rep: G.rep, bought: [...G.bought], padPaid: G.padPaid, time: G.time, won: G.won, hint: G.hint, served: G.served,
+    sold: G.sold, earned: G.earned, baked: G.baked,
     shelves: Object.fromEntries(stallList.map(s => [s.type, [s.shelf, s.coins]])), eggs: coop.eggs, oven: [oven.egg, oven.wood, oven.pies],
     stack: player.stack.map(s => s.t), px: player.x, py: player.y };
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify(d)); } catch (e) {}
+  try { localStorage.setItem(RUN_KEY, JSON.stringify(d)); } catch (e) {}
 }
+// Loads progress; returns true when a level was in progress (it stays paused until the UI resumes it).
 function load() {
-  let d; try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) {}
-  if (!d) { derive(); return; }
-  Object.assign(G, { coins: d.coins, coinsEver: d.coinsEver, rep: d.rep, padPaid: d.padPaid || {}, time: d.time, won: d.won, hint: d.hint, served: d.served || 0 });
+  loadMeta();
+  let d; try { d = JSON.parse(localStorage.getItem(RUN_KEY)); } catch (e) {}
+  if (!d || !LEVELS[d.level]) { G.level = -1; return false; }
+  G.level = d.level; resetWorld();
+  Object.assign(G, { coins: d.coins, coinsEver: d.coinsEver, rep: d.rep, padPaid: d.padPaid || {}, time: d.time, won: d.won, hint: d.hint, served: d.served || 0,
+    sold: d.sold || G.sold, earned: d.earned || 0, baked: d.baked || 0 });
   G.bought = new Set(d.bought);
   for (const s of stallList) if (d.shelves[s.type]) [s.shelf, s.coins] = d.shelves[s.type];
   coop.eggs = d.eggs; [oven.egg, oven.wood, oven.pies] = d.oven;
@@ -524,11 +642,9 @@ function load() {
   camX = player.x; camY = player.y;
   derive();
   if (G.hint === 4) G.hint = 5;
+  return true;
 }
 setInterval(save, 2000);
 addEventListener('visibilitychange', () => { if (document.hidden) save(); });
 
-function fmtTime(t) { const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ' мин ' + s + ' с'; }
-function showWin() { document.getElementById('wtime').textContent = fmtTime(G.time); document.getElementById('win').hidden = false; }
-document.getElementById('wok').onclick = () => { document.getElementById('win').hidden = true; };
-document.getElementById('reset').onclick = () => { if (confirm('Начать игру заново?')) { localStorage.removeItem(SAVE_KEY); location.reload(); } };
+function fmtClock(t) { t = Math.max(0, Math.floor(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }

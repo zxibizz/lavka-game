@@ -1,95 +1,81 @@
-// Runs the simulation (public/game.js) headless and lets a simple bot play it to the end.
+// Runs the simulation (public/game.js) headless; the bot lives in test/bot.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import vm from 'node:vm';
+import { loadGame, play } from './bot.mjs';
 
-function loadGame(seed = 1) {
-  let r = seed; // deterministic randomness, so a failure can be replayed
-  const M = Object.create(Math); M.random = () => (r = (r * 16807) % 2147483647) / 2147483647;
-  const el = () => ({ hidden: true, onclick: null, textContent: '' });
-  const els = {};
-  const store = {};
-  const ctx = {
-    console, Math: M, JSON, Set, Map, Object, Array, Number, String,
-    addEventListener() {}, setInterval() {}, confirm: () => false,
-    location: { reload() {} },
-    document: { getElementById: (id) => (els[id] ||= el()), hidden: false },
-    localStorage: { getItem: (k) => store[k] ?? null, setItem: (k, v) => { store[k] = String(v); }, removeItem: (k) => { delete store[k]; } },
-  };
-  vm.createContext(ctx);
-  const src = fs.readFileSync(new URL('../public/game.js', import.meta.url), 'utf8');
-  vm.runInContext(src + '\n;globalThis.__g = { G, player, stalls, coop, oven, PADS, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, padVisible, padPaid, load, save };', ctx);
-  ctx.__g.load();
-  return { g: ctx.__g, els, store, ctx };
-}
-
-// Same strategy as the browser check: buy what is affordable, collect money, keep shelves stocked,
-// stand at the counter while a customer waits, feed the bakery.
-function play(g, seconds) {
-  const p = g.player, log = [];
-  const CASH = { egg: 'cashEgg', wood: 'cashWood', pie: 'cashPie' };
-  const open = () => Object.values(g.stalls).filter((s) => g.G.bought.has(s.id));
-  const go = (x, y) => { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy), st = p.speed / 30; if (d > .3) { p.x += dx / d * Math.min(st, d); p.y += dy / d * Math.min(st, d); return false; } return true; };
-  let skip = 0; // rotates which tree to use after a timeout
-  const tree = () => { const ok = g.trees.filter((t) => t.logs > 0); return ok[skip % Math.max(1, ok.length)]; };
-  let task = null, forOven = false;
-  const seen = new Set(g.G.bought);
-  for (let i = 0; i < seconds * 30 && !g.G.won; i++) {
-    if (task && i - task.since > 30 * 12) { task = null; skip++; } // target unreachable (e.g. blocked by trees): pick another
-    if (!task) {
-      const pad = g.PADS.find((q) => g.padVisible(q) && g.G.coins + g.padPaid(q) >= q.cost);
-      const waiting = open().find((s) => !g.G.bought.has(CASH[s.type]) && s.shelf > 0 && s.queue[0] && s.queue[0].arrived && s.queue[0].pat < s.queue[0].patMax * .6);
-      const rich = open().find((s) => s.coins >= 8);
-      if (pad) task = { k: 'pad', x: pad.x, y: pad.y, id: pad.id };
-      else if (waiting) task = { k: 'drop', x: waiting.drop.x, y: waiting.drop.y, s: waiting };
-      else if (rich) task = { k: 'coins', x: rich.cz.x, y: rich.cz.y, s: rich };
-      else if (p.stack.length && forOven && !(p.stack.length < p.cap && p.stack.every((q) => q.t === 'egg'))) { task = { k: 'oven', x: g.OVEN_IN.x, y: g.OVEN_IN.y }; forOven = false; }
-      else if (p.stack.length && forOven) { const t = tree(); task = { k: 'gather', x: t.x, y: t.y + .6 }; }
-      else if (p.stack.length) {
-        const types = new Set(p.stack.map((s) => s.t));
-        const st = open().find((s) => types.has(s.type) && s.shelf < s.max);
-        if (st) task = { k: 'drop', x: st.drop.x, y: st.drop.y, s: st };
-        else if (g.G.bought.has('oven')) task = { k: 'oven', x: g.OVEN_IN.x, y: g.OVEN_IN.y };
-        else p.stack.length = 0;
-      } else {
-        const st = open().sort((a, b) => (a.shelf - a.queue.length * 2) - (b.shelf - b.queue.length * 2))[0];
-        if (st.type === 'egg') task = { k: 'gather', x: g.NEST.x, y: g.NEST.y };
-        else if (st.type === 'wood') { const t = tree(); task = t ? { k: 'gather', x: t.x, y: t.y + .6 } : { k: 'gather', x: g.NEST.x, y: g.NEST.y }; }
-        else if (g.oven.pies > 0) task = { k: 'gather', x: g.OVEN_OUT.x, y: g.OVEN_OUT.y };
-        else if (p.stack.length < p.cap / 2) { task = { k: 'gather', x: g.NEST.x, y: g.NEST.y, half: true }; forOven = true; }
-      }
+test('every level can be finished within its silver time', () => {
+  const { g: probe } = loadGame(1);
+  for (let i = 0; i < probe.LEVELS.length; i++) {
+    for (const seed of [1, 2, 3]) {
+      const { g } = loadGame(seed);
+      g.startLevel(i);
+      play(g, 2400);
+      const L = g.LEVELS[i];
+      assert.ok(g.G.done, `level ${i + 1} seed ${seed}: not finished`);
+      assert.ok(g.G.time <= L.silver, `level ${i + 1} seed ${seed}: ${Math.round(g.G.time)} s > silver ${L.silver}`);
+      assert.ok(L.gold < L.silver, `level ${i + 1}: gold < silver`);
     }
-    if (task && task.since === undefined) task.since = i;
-    if (task && task.k === 'gather' && p.stack.length >= (task.half ? p.cap / 2 : p.cap)) task = null;
-    if (task && go(task.x, task.y)) {
-      task.here = (task.here || 0) + 1 / 30;
-      const done = task.k === 'pad' ? (g.G.bought.has(task.id) || g.G.coins === 0)
-        : task.k === 'coins' ? task.s.coins === 0
-        : task.k === 'drop' ? ((!p.stack.some((s) => s.t === task.s.type) || task.s.shelf >= task.s.max)
-            && (g.G.bought.has(CASH[task.s.type]) || task.here > 10 || !(task.s.shelf > 0 && task.s.queue[0] && task.s.queue[0].entered)))
-        : task.k === 'oven' ? task.here > 1.5 && (task.here > 4 || !p.stack.length)
-        : (p.stack.length >= (task.half ? p.cap / 2 : p.cap) || task.here > 3);
-      if (done) task = null;
-    }
-    g.update(1 / 30);
-    for (const id of g.G.bought) if (!seen.has(id)) { seen.add(id); log.push(id); }
-  }
-  return log;
-}
-
-test('a bot can build the whole village and open the fair', () => {
-  for (let seed = 1; seed <= 12; seed++) {
-    const { g, els } = loadGame(seed);
-    const log = play(g, 1800);
-    assert.ok(g.G.won, `seed ${seed}: not finished in 30 min of game time; bought: ${log.join(', ')}`);
-    assert.equal(els.win.hidden, false, 'the win screen is shown');
-    assert.ok(g.G.time < 1500, `seed ${seed}: took ${Math.round(g.G.time)} s`);
   }
 });
 
+test('finishing a level pays savings, records stars and unlocks the next one', () => {
+  const { g, ctx } = loadGame(1);
+  assert.equal(g.levelUnlocked(1), false);
+  g.startLevel(0);
+  play(g, 600);
+  const r = ctx.results.at(-1);
+  assert.ok(r && r.level === 0 && r.first);
+  assert.equal(r.stars, g.starsFor(0, r.time));
+  assert.equal(g.META.stars[0], r.stars);
+  assert.equal(g.META.bank, r.reward);
+  assert.equal(g.levelUnlocked(1), true);
+  g.startLevel(0); play(g, 600);
+  const again = ctx.results.at(-1);
+  assert.equal(again.first, false);
+  assert.equal(again.reward, Math.round(g.LEVELS[0].reward * again.stars * .5), 'replays pay half');
+});
+
+test('stars follow the medal times', () => {
+  const { g } = loadGame(1);
+  const L = g.LEVELS[2];
+  assert.equal(g.starsFor(2, L.gold), 3);
+  assert.equal(g.starsFor(2, L.gold + 1), 2);
+  assert.equal(g.starsFor(2, L.silver), 2);
+  assert.equal(g.starsFor(2, L.silver + 1), 1);
+});
+
+test('workshop upgrades cost savings and change the game', () => {
+  const { g } = loadGame(1);
+  g.META.bank = 1000;
+  g.startLevel(0);
+  const cap = g.player.cap, speed = g.player.speed, coins = g.G.coins;
+  assert.ok(g.buyUpgrade('bag')); assert.ok(g.buyUpgrade('speed')); assert.ok(g.buyUpgrade('start'));
+  assert.equal(g.META.bank, 1000 - 3 * 15);
+  g.startLevel(0);
+  assert.equal(g.player.cap, cap + 1);
+  assert.ok(g.player.speed > speed);
+  assert.equal(g.G.coins, coins + 10);
+  for (let i = 1; i < 5; i++) g.buyUpgrade('bag');
+  assert.equal(g.up('bag'), 5);
+  assert.equal(g.buyUpgrade('bag'), false, 'capped at 5');
+});
+
+test('a new level starts from a clean farm', () => {
+  const { g } = loadGame(1);
+  g.startLevel(14); play(g, 200);
+  assert.ok(g.G.bought.size > 1);
+  g.startLevel(0);
+  assert.deepEqual([...g.G.bought], ['eggStall']);
+  assert.equal(g.G.coins, 0); assert.equal(g.G.time, 0);
+  assert.equal(g.customers.length, 0); assert.equal(g.player.stack.length, 0);
+  assert.equal(g.stalls.egg.shelf, 0);
+  assert.ok(!g.padVisible(g.PADS.find((p) => p.id === 'grove')), 'pads outside the level are hidden');
+});
+
 test('selling needs someone at the counter until a cashier is hired', () => {
-  const { g } = loadGame();
+  const { g } = loadGame(1);
+  g.startLevel(0);
   const st = g.stalls.egg;
   st.shelf = 5; g.player.x = 4; g.player.y = 12;
   for (let i = 0; i < 30 * 40; i++) g.update(1 / 30);
@@ -99,19 +85,26 @@ test('selling needs someone at the counter until a cashier is hired', () => {
   assert.ok(st.shelf < 5, 'sold while the player stands in the sell zone');
 });
 
-test('save and load restore progress', () => {
-  const a = loadGame();
-  a.g.G.coins = 42; a.g.G.bought.add('chick2'); a.g.save();
-  const b = loadGame();
+test('a level in progress survives a reload', () => {
+  const a = loadGame(1);
+  a.g.startLevel(3);
+  for (let i = 0; i < 30 * 20; i++) a.g.update(1 / 30);
+  a.g.G.coins = 42; a.g.save();
+  const b = loadGame(1);
   Object.assign(b.store, a.store);
-  b.g.load();
+  assert.equal(b.g.load(), true);
+  assert.equal(b.g.G.level, 3);
   assert.equal(b.g.G.coins, 42);
-  assert.ok(b.g.G.bought.has('chick2'));
-  assert.equal(b.g.coop.n, 2);
+  assert.ok(Math.abs(b.g.G.time - a.g.G.time) < 1e-9);
+  b.g.quitLevel();
+  const c = loadGame(1);
+  Object.assign(c.store, b.store);
+  assert.equal(c.g.load(), false, 'quitting forgets the run');
 });
 
 test('the touch joystick moves the player', () => {
   const { g, ctx } = loadGame();
+  g.startLevel(0);
   const p = g.player, x0 = p.x, y0 = p.y;
   vm.runInContext('joy = { id: 1, ox: 100, oy: 100, x: 100, y: 40 }', ctx); // drag up
   for (let i = 0; i < 30; i++) g.update(1 / 30);
