@@ -187,3 +187,21 @@ test('the joystick sets direction only', () => {
   assert.ok(short > 1);
   assert.ok(Math.abs(short - long) < 1e-9);
 });
+
+test('review fixes: seeds only go into fields; the "build a field" step is not skipped; level-ups add up; generated tasks stay put', () => {
+  const { g } = loadGame(1);
+  g.G.coins = 100;
+  assert.equal(g.plant(g.B.find((b) => b.type === 'barn'), 'wheat'), false);
+  g.G.task = 4; g.G.taskN = 1; g.player.x = 1; g.player.y = 1;
+  const coop = g.B.find((b) => b.type === 'coop'), fr = g.front(coop);
+  coop.stock = 3; g.player.x = fr.x; g.player.y = fr.y; g.step(1);
+  assert.equal(g.curTask().what, 'field', 'after the eggs comes "build a field"');
+  const { g: h } = loadGame(1);
+  h.G.lvl = 4; h.G.xp = h.xpFor(7) - 1; h.G.levelUp = null; // one harvest crosses levels 5, 6 and 7
+  const f = h.B.find((b) => b.type === 'field'), c = h.center(f); h.player.x = c.x; h.player.y = c.y; h.step(.5);
+  assert.ok(h.G.lvl >= 7, `level ${h.G.lvl}`);
+  assert.ok(h.G.levelUp.unlocks.some((u) => u.name === 'Молочная') && h.G.levelUp.unlocks.some((u) => u.name === 'Соковарня'), 'levels 5 and 6 both listed');
+  h.G.task = h.TASKS.length; const t1 = h.curTask().text;
+  h.G.lvl = 9; h.G.coins = 1e5; h.build('mill', ...Object.values(h.freeSpot('mill', 6, -4)));
+  assert.equal(h.curTask().text, t1);
+});

@@ -703,7 +703,7 @@ function makeBuilding(type) {
   return g;
 }
 const bMeshes = new Map(); // building id -> { g, b }
-let gridSig = '';
+let gridSig = -1;
 
 // crops: per crop an instanced mesh; each field shows a 3 x 3 patch of plants
 const CROP_SPOTS = [];
@@ -948,9 +948,11 @@ function sync() {
   const s = wall();
 
   // buildings
-  const sig = B.map(b => b.id + ':' + b.x + ',' + b.y).join('|');
-  if (sig !== gridSig) { gridSig = sig; refreshGrass(); }
-  for (const [id, m] of bMeshes) if (!B.includes(m.b)) { scene.remove(m.g); bMeshes.delete(id); }
+  if (layoutV !== gridSig) {
+    gridSig = layoutV; refreshGrass();
+    const live = new Set(B);
+    for (const [id, m] of bMeshes) if (!live.has(m.b)) { scene.remove(m.g); bMeshes.delete(id); }
+  }
   for (const b of B) {
     let m = bMeshes.get(b.id);
     if (!m) { m = { g: makeBuilding(b.type), b }; scene.add(m.g); bMeshes.set(b.id, m); }

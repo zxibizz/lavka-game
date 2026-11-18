@@ -142,7 +142,12 @@ function startPlacing(type, b) {
 function confirmPlacing() {
   const P = G.placing; if (!P) return;
   if (!canPlace(P.type, P.x, P.y, P.b)) { $('placeOk').classList.add('shake'); setTimeout(() => $('placeOk').classList.remove('shake'), 400); return; }
-  if (P.b) moveBuilding(P.b, P.x, P.y); else build(P.type, P.x, P.y);
+  const ok = P.b ? moveBuilding(P.b, P.x, P.y) : build(P.type, P.x, P.y);
+  if (!ok) { // e.g. the coins were spent meanwhile
+    $('placeOk').classList.add('shake'); setTimeout(() => $('placeOk').classList.remove('shake'), 400);
+    if (!P.b && canBuy(P.type) === 'coins') { G.placing = null; openShop(); }
+    return;
+  }
   G.placing = null; syncChrome();
 }
 
@@ -205,7 +210,10 @@ function uiInit() {
     }
   }, 250);
   show(null);
-  if (G.away > 120) {
+  if (G.restarted) {
+    $('awayText').textContent = 'Игра обновилась: теперь ферма живёт по настоящему времени, здания можно ставить где хочешь, а уровни открывают новое. Ферма начинается заново.';
+    show('away');
+  } else if (G.away > 120) {
     $('awayText').textContent = `Тебя не было ${fmtTime(G.away)}. За это время урожай подрос, куры несли яйца, а фабрики доделали заказы.`;
     show('away');
   }

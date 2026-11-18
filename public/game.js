@@ -101,17 +101,21 @@ function cellsOf(type, x, y) {
   if (hasFront(type)) for (let i = Math.floor(w / 2) - 1; i <= Math.ceil(w / 2); i++) if (i >= 0 && i < w) apron.push([x + i, y + h]);
   return { body, apron };
 }
-function canPlace(type, x, y, ignore) {
-  const c = CATALOG[type];
-  if (x < BUILD.x0 || y < BUILD.y0 || x + c.w > BUILD.x1 || y + c.h > BUILD.y1) return false;
-  const { body, apron } = cellsOf(type, x, y);
-  if (apron.some(([, j]) => j >= BUILD.y1)) return false;
+// which cells are taken: 'B' by a building, 'A' by the space in front of a door
+function occupancy(ignore) {
   const occ = new Map();
   for (const b of B) if (b !== ignore && CATALOG[b.type].w) {
     const o = cellsOf(b.type, b.x, b.y);
     for (const [i, j] of o.body) occ.set(i + ',' + j, 'B');
     for (const [i, j] of o.apron) if (!occ.has(i + ',' + j)) occ.set(i + ',' + j, 'A');
   }
+  return occ;
+}
+function canPlace(type, x, y, ignore, occ = occupancy(ignore)) {
+  const c = CATALOG[type];
+  if (x < BUILD.x0 || y < BUILD.y0 || x + c.w > BUILD.x1 || y + c.h > BUILD.y1) return false;
+  const { body, apron } = cellsOf(type, x, y);
+  if (apron.some(([, j]) => j >= BUILD.y1)) return false;
   if (body.some(([i, j]) => occ.has(i + ',' + j))) return false;
   if (apron.some(([i, j]) => occ.get(i + ',' + j) === 'B')) return false;
   // solid buildings may not land on the heroine
@@ -121,11 +125,11 @@ function canPlace(type, x, y, ignore) {
 }
 // a free spot near (cx, cy), spiralling out
 function freeSpot(type, cx, cy, ignore) {
-  const c = CATALOG[type];
+  const c = CATALOG[type], occ = occupancy(ignore);
   for (let r = 0; r < 30; r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) {
     if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
     const x = Math.round(cx - c.w / 2) + dx, y = Math.round(cy - c.h / 2) + dy;
-    if (canPlace(type, x, y, ignore)) return { x, y };
+    if (canPlace(type, x, y, ignore, occ)) return { x, y };
   }
   return null;
 }
@@ -171,12 +175,15 @@ function moveBuilding(b, x, y) {
   if (!canPlace(b.type, x, y, b)) return false;
   b.x = x; b.y = y; b.born = now;
   if (CATALOG[b.type].kind === 'pen') { b.animals.length = 0; }
+  for (const h of helpers) if (h.job && h.job.b === b) { h.job = null; h.path = []; }
   derive(); save(); return true;
 }
 
 // ---------- derived state ----------
 let SOLIDS = [];
+let layoutV = 0; // changes whenever buildings are added, moved or removed (the view rebuilds what depends on the layout)
 function derive() {
+  layoutV++;
   player.cap = 8 + 2 * lvl('bag');
   player.speed = 5.2 * (1 + .08 * lvl('boots'));
   G.barnCap = 40 + 25 * lvl('barn');
@@ -253,7 +260,7 @@ function addXp(n) {
   G.xp += n;
   while (G.xp >= xpFor(G.lvl + 1)) {
     G.lvl++;
-    G.levelUp = { lvl: G.lvl, unlocks: unlocksAt(G.lvl) };
+    G.levelUp = { lvl: G.lvl, unlocks: [...(G.levelUp ? G.levelUp.unlocks : []), ...unlocksAt(G.lvl)] };
     burst(player.x, player.y, 1.5, ['#ffd84d', '#ff7a59', '#7ed0ff', '#ffffff', '#9be15d'], 40);
     floatText(player.x, player.y, 2.6, 'Уровень ' + G.lvl + '!', '#ffe46b');
     derive();
@@ -314,7 +321,12 @@ function genTask(k) {
   return { text: (sell ? 'Продай: ' : ev === 'make' ? 'Сделай: ' : 'Собери: ') + ITEM[t].name.toLowerCase(), ev, what: t, n,
     coins: Math.round(ITEM[t].price * n * .6), xp: Math.max(4, Math.round(n * 2 + k / 2)) };
 }
-const curTask = () => (G.task < TASKS.length ? TASKS[G.task] : genTask(G.task - TASKS.length));
+// a generated task is kept until done, so it does not change when the farm grows
+function curTask() {
+  if (G.task < TASKS.length) return TASKS[G.task];
+  if (!G.gen || G.gen.k !== G.task) G.gen = { k: G.task, ...genTask(G.task - TASKS.length) };
+  return G.gen;
+}
 function event(ev, what, n = 1) {
   const t = curTask();
   if (t.ev !== ev || (t.what && t.what !== what)) return;
@@ -331,7 +343,8 @@ function event(ev, what, n = 1) {
 function skipDoneTasks() {
   for (let guard = 0; guard < 8 && G.task < TASKS.length; guard++) {
     const t = TASKS[G.task];
-    const done = (t.ev === 'build' && t.what !== 'stall' && countOf(t.what) >= t.n) || (t.ev === 'build' && t.what === 'stall' && G.stalls > 1)
+    const unique = t.ev === 'build' && t.what !== 'field' && t.what !== 'stall' && CATALOG[t.what].kind !== 'decor';
+    const done = (unique && countOf(t.what) >= t.n) || (t.ev === 'build' && t.what === 'stall' && G.stalls > 1)
       || (t.ev === 'cashier' && G.cashiers.some(Boolean)) || (t.ev === 'worker' && G.workers > 0);
     if (!done) break;
     G.task++; G.taskN = 0;
@@ -345,7 +358,7 @@ function fieldState(b, s = wall()) {
 }
 function plant(b, crop) {
   const c = CROPS[crop];
-  if (!c || G.lvl < c.lvl || fieldState(b) !== 'empty' || G.coins < c.seed) return false;
+  if (!b || CATALOG[b.type].kind !== 'field' || !c || G.lvl < c.lvl || fieldState(b) !== 'empty' || G.coins < c.seed) return false;
   G.coins -= c.seed; b.crop = crop; b.at = wall(); b.left = c.yield;
   const m = center(b); burst(m.x, m.y, .2, ['#8a5a2b', '#7cc44f'], 5);
   event('plant', crop);
@@ -713,6 +726,7 @@ function workerJob(h, s) {
 }
 function updateWorker(h, dt, s) {
   h.tx -= dt; h.chopping = Math.max(0, h.chopping - dt);
+  if (!h.job && h.tx > 0) { moveActor(h, 0, 0, h.speed, dt); return; }
   if (!h.job) {
     const j = workerJob(h, s);
     if (j) { h.job = j; h.path = findPath(h.x, h.y, j.x, j.y); }
@@ -728,7 +742,7 @@ function updateWorker(h, dt, s) {
   if (h.tx > 0) return;
   const b = h.job.b, k = CATALOG[b.type].kind;
   let did = false;
-  if (!B.includes(b)) did = false;
+  if (!B.includes(b) || Math.hypot(h.x - h.job.x, h.y - h.job.y) > 1.2) did = false; // gone or moved away
   else if (h.job.unload) did = unload(h, b);
   else if (k === 'field') {
     const crop = b.crop;
@@ -736,20 +750,21 @@ function updateWorker(h, dt, s) {
     if (did) { h.chopping = .25; h.tool = 'none'; if (!b.crop && G.coins >= CROPS[crop].seed) plant(b, crop); }
   } else if (k === 'pen') did = collectPen(h, b);
   else if (k === 'factory') did = collectFactory(h, b);
-  if (did) h.tx = .18; else h.job = null;
+  if (did) h.tx = .18;
+  else { if (h.job.unload && h.stack.length) h.tx = 2; h.job = null; } // barn full: wait a bit before trying again
 }
 
 // ---------- save / load ----------
 const SAVE_KEY = 'lavka-v4';
 let loaded = false; // nothing is saved until load() ran: the blank start state must never overwrite a farm
 function snapshot() {
-  return { v: 4, G: { coins: G.coins, xp: G.xp, lvl: G.lvl, rep: G.rep, barn: G.barn, up: G.up, served: G.served, task: G.task, taskN: G.taskN, seed: G.seed, stalls: G.stalls, cashiers: G.cashiers, workers: G.workers, hint: G.hint },
+  return { v: 4, G: { coins: G.coins, xp: G.xp, lvl: G.lvl, rep: G.rep, barn: G.barn, up: G.up, served: G.served, task: G.task, taskN: G.taskN, gen: G.gen, seed: G.seed, stalls: G.stalls, cashiers: G.cashiers, workers: G.workers, hint: G.hint },
     B: B.map(b => { const { animals, born, fresh, ...rest } = b; return rest; }), nextId,
     stalls: stallState.map(s => s.coins), stack: player.stack.map(s => s.t), px: player.x, py: player.y, saved: wall() };
 }
 function save() { if (!loaded) return; try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) {} }
 function newFarm() {
-  Object.assign(G, { coins: 30, xp: 0, lvl: 1, rep: 3, barn: {}, up: {}, served: 0, task: 0, taskN: 0, spawnT: 2, seed: 'wheat', stalls: 1, cashiers: [], workers: 0, hint: 0, levelUp: null, placing: null, autoPlant: true, away: 0 });
+  Object.assign(G, { coins: 30, xp: 0, lvl: 1, rep: 3, barn: {}, up: {}, served: 0, task: 0, taskN: 0, gen: null, spawnT: 2, seed: 'wheat', stalls: 1, cashiers: [], workers: 0, hint: 0, levelUp: null, placing: null, autoPlant: true, away: 0 });
   B = []; nextId = 1;
   customers.length = 0; helpers.length = 0; flyers.length = 0; floats.length = 0; parts.length = 0;
   for (const st of stallState) { st.queue.length = 0; st.coins = 0; }
@@ -763,9 +778,11 @@ function newFarm() {
 }
 function resetFarm() { newFarm(); loaded = true; save(); }
 function load() {
-  try { for (const k of ['lavka-meta-v1', 'lavka-run-v1', 'lavka-proto-v1', 'lavka-farm-v1']) localStorage.removeItem(k); } catch (e) {}
+  let old = false;
+  try { for (const k of ['lavka-meta-v1', 'lavka-run-v1', 'lavka-proto-v1', 'lavka-farm-v1']) { if (localStorage.getItem(k) !== null) old = true; localStorage.removeItem(k); } } catch (e) {}
   newFarm();
   loaded = true;
+  G.restarted = old && !localStorage.getItem(SAVE_KEY); // an older version's farm was dropped: the menu says why
   let d; try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) {}
   if (!d || d.v !== 4) return false;
   Object.assign(G, d.G);
