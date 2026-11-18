@@ -21,10 +21,12 @@ const ITEM = {
 // Land plots. The yard is owned from the start; the rest is fenced off until its land is bought.
 const ZONES = {
   yard: { rect: [0, 0, 20, 25.4], title: 'Двор' },
-  field: { rect: [-21, 0, -.6, 25.4], land: 'landField', title: 'Поле' },
-  pasture: { rect: [20.6, 0, 41, 25.4], land: 'landPasture', title: 'Пастбище' },
-  garden: { rect: [0, -17, 20, -.6], land: 'landGarden', title: 'Огород' },
+  field: { rect: [-21, 0, 0, 25.4], land: 'landField', title: 'Поле' },
+  pasture: { rect: [20, 0, 41, 25.4], land: 'landPasture', title: 'Пастбище' },
+  garden: { rect: [0, -17, 20, 0], land: 'landGarden', title: 'Огород' },
 };
+// the corners north of the field and the pasture belong to no plot: never walkable
+const CORNERS = [[WORLD.x0, WORLD.y0, 0, 0], [20, WORLD.y0, WORLD.x1, 0]];
 
 const G = { coins: 0, coinsEver: 0, rep: 3, built: new Set(), up: {}, padPaid: {}, time: 0, hint: 0, hintT: 0, spawnT: 2, served: 0, earned: 0, cozy: 0, paused: false, fair: false };
 let now = 0;
@@ -76,9 +78,8 @@ const PLANT_GROUPS = {
   field: { item: 'wheat', kind: 'wheat', regrow: 9, chop: .2, count: () => 6 + 4 * lvl('field.more'), logs: () => 2 },
   garden: { item: 'pumpkin', kind: 'pumpkin', regrow: 12, chop: .3, count: () => 4 + 2 * lvl('garden.more'), logs: () => 1 },
 };
-plants.forEach((p, i) => Object.assign(p, { i, logs: 0, regrow: 0, shake: 0, pop: 0 }));
-const plantActive = p => built(p.group) && plants.filter(q => q.group === p.group).indexOf(p) < PLANT_GROUPS[p.group].count();
-function plantIdx(p) { let k = 0; for (const q of plants) { if (q === p) return k; if (q.group === p.group) k++; } return -1; }
+{ const k = {}; plants.forEach((p, i) => Object.assign(p, { i, gi: (k[p.group] = (k[p.group] ?? -1) + 1), logs: 0, regrow: 0, shake: 0, pop: 0 })); }
+const plantActive = p => built(p.group) && p.gi < PLANT_GROUPS[p.group].count();
 const regrowTime = g => PLANT_GROUPS[g].regrow * Math.pow(.8, lvl(g + '.regrow'));
 
 // converters: take inputs at IN, cook, put the product on the OUT pile
@@ -164,7 +165,7 @@ const DEFS = [
 const DEF = Object.fromEntries(DEFS.map(d => [d.id, d]));
 for (const d of DEFS) { // which plot each pad stands in
   if (d.zone && d.kind === 'land') d.padZone = 'yard';
-  else d.padZone = Object.keys(ZONES).find(z => { const [x0, y0, x1, y1] = ZONES[z].rect; return d.pad && d.pad[0] >= x0 && d.pad[0] <= x1 && d.pad[1] >= y0 && d.pad[1] <= y1; }) || 'yard';
+  else d.padZone = Object.keys(ZONES).find(z => { const [x0, y0, x1, y1] = ZONES[z].rect; return d.pad && d.pad[0] > x0 && d.pad[0] < x1 && d.pad[1] > y0 && d.pad[1] < y1; }) || 'yard';
 }
 const PADS = DEFS.filter(d => d.pad);
 PADS.forEach(p => { p.x = p.pad[0]; p.y = p.pad[1]; p.stand = 0; p.payT = 0; p.pop = 0; });
@@ -255,6 +256,7 @@ function solids() {
   r.push([SHED.x - 1.1, SHED.y - .8, SHED.x + 1.1, SHED.y + .8]);
   for (const d of DEFS) if (d.solid && built(d.id)) r.push([d.x - d.solid, d.y - d.solid, d.x + d.solid, d.y + d.solid]);
   for (const z of Object.values(ZONES)) if (z.land && !built(z.land)) r.push(z.rect);
+  r.push(...CORNERS);
   return r;
 }
 let SOLIDS = [];
@@ -335,7 +337,7 @@ function derive() {
   for (const st of stallList) st.max = 14 + 4 * lvl(st.id + '.level');
   for (const t of plants) {
     const was = t.active; t.active = plantActive(t);
-    if (t.active && !was && !t.inited) { t.logs = PLANT_GROUPS[t.group].logs(); t.inited = true; t.pop = now + plantIdx(t) * .05; }
+    if (t.active && !was && !t.inited) { t.logs = PLANT_GROUPS[t.group].logs(); t.inited = true; t.pop = now + t.gi * .05; }
   }
   for (const d of DEFS) if (d.kind === 'helper' && built(d.id) && !helpers.some(h => h.job === d.item)) addHelper(d);
   G.cozy = DEFS.reduce((s, d) => s + (d.kind === 'decor' && built(d.id) ? d.cozy : 0), 0);
@@ -739,13 +741,14 @@ function hint() {
 
 // ---------- save / load ----------
 const SAVE_KEY = 'lavka-farm-v1';
+let loaded = false; // nothing is saved until load() ran: the blank start state must never overwrite a farm
 function snapshot() {
   return { v: 1, coins: G.coins, coinsEver: G.coinsEver, rep: G.rep, built: [...G.built], up: G.up, padPaid: G.padPaid, time: G.time, hint: G.hint, served: G.served, earned: G.earned,
     stalls: Object.fromEntries(stallList.map(s => [s.type, [s.shelf, s.coins]])), pens: Object.fromEntries(penList.map(p => [p.id, p.stock])),
-    convs: Object.fromEntries(convList.map(c => [c.id, [c.store, c.out_n]])), plants: plants.map(t => t.inited ? Math.round(t.logs) : -1),
+    convs: Object.fromEntries(convList.map(c => [c.id, [c.store, c.out_n, Math.max(0, c.cook)]])), plants: plants.map(t => t.inited ? Math.round(t.logs) : -1),
     stack: player.stack.map(s => s.t), px: player.x, py: player.y };
 }
-function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) {} }
+function save() { if (!loaded) return; try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) {} }
 function newFarm() {
   Object.assign(G, { coins: 0, coinsEver: 0, rep: 3, built: new Set(DEFS.filter(d => d.start).map(d => d.id)), up: {}, padPaid: {}, time: 0, hint: 0, hintT: 0, spawnT: 2, served: 0, earned: 0 });
   for (const st of stallList) { st.shelf = 0; st.coins = 0; st.queue.length = 0; st.t = 0; }
@@ -758,11 +761,12 @@ function newFarm() {
   camX = player.x; camY = player.y;
   derive();
 }
-function resetFarm() { newFarm(); save(); }
+function resetFarm() { newFarm(); loaded = true; save(); }
 // Loads the farm (or starts a new one). Old level-mode saves from 0.2 are dropped.
 function load() {
   try { for (const k of ['lavka-meta-v1', 'lavka-run-v1', 'lavka-proto-v1']) localStorage.removeItem(k); } catch (e) {}
   newFarm();
+  loaded = true;
   let d; try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) {}
   if (!d || d.v !== 1) return false;
   Object.assign(G, { coins: d.coins || 0, coinsEver: d.coinsEver || 0, rep: d.rep || 3, up: d.up || {}, padPaid: d.padPaid || {}, time: d.time || 0, hint: d.hint || 0, served: d.served || 0, earned: d.earned || 0 });
@@ -770,7 +774,7 @@ function load() {
   derive();
   for (const s of stallList) if (d.stalls && d.stalls[s.type]) [s.shelf, s.coins] = d.stalls[s.type];
   for (const p of penList) if (d.pens && d.pens[p.id] !== undefined) p.stock = d.pens[p.id];
-  for (const c of convList) if (d.convs && d.convs[c.id]) { Object.assign(c.store, d.convs[c.id][0]); c.out_n = d.convs[c.id][1]; }
+  for (const c of convList) if (d.convs && d.convs[c.id]) { Object.assign(c.store, d.convs[c.id][0]); c.out_n = d.convs[c.id][1]; c.cook = d.convs[c.id][2] || 0; }
   if (d.plants) plants.forEach((t, i) => { if (t.active && d.plants[i] >= 0) { t.logs = d.plants[i]; if (t.logs <= 0) t.regrow = regrowTime(t.group) * .5; } t.pop = 0; });
   player.stack = (d.stack || []).filter(t => ITEM[t]).map(t => ({ t, land: 0 }));
   if (typeof d.px === 'number') { player.x = d.px; player.y = d.py; }

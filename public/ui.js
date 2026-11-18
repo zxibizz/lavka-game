@@ -54,7 +54,7 @@ function renderUpgrades() {
   }
 }
 
-function uiInit(resumed) {
+function uiInit() {
   $('pauseBtn').onclick = openPause;
   $('pauseResume').onclick = () => show(null);
   $('upClose').onclick = () => show(null);

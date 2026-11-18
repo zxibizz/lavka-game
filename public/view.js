@@ -199,6 +199,7 @@ function modelFit(name, w, d, x, y, rotY = 0, parent = scene, colors) {
   return model(name, a.size.y * s, x, y, rotY, parent, colors);
 }
 
+const fmtN = n => n >= 10000 ? (n / 1000).toFixed(1).replace('.', ',') + 'к' : String(n);
 let seed = 11; const srnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 
 // ---------- ground ----------
@@ -442,7 +443,7 @@ function drawPadDecal(p) {
     if (prog > 0) { g.save(); rr(g, x0, y0, w, w, .26 * s); g.clip(); g.fillStyle = land ? 'rgba(245,170,40,.85)' : 'rgba(110,215,70,.8)'; g.fillRect(x0, y0 + w * (1 - prog), w, w * prog); g.restore(); }
     g.lineWidth = (on ? .12 : .09) * s; g.strokeStyle = '#fff'; rr(g, x0, y0, w, w, .26 * s); g.stroke();
     padIcon(g, p.icon, x0 + w / 2, y0 + .58 * s, .95 * s);
-    const txt = left >= 10000 ? (left / 1000).toFixed(1).replace('.', ',') + 'к' : String(left);
+    const txt = fmtN(left);
     g.font = `900 ${.4 * s}px ${FONT}`;
     const tw = g.measureText(txt).width;
     cashIcon(g, x0 + w / 2 - tw / 2 - .12 * s, y0 + 1.22 * s, s);
@@ -812,16 +813,17 @@ function signBoard(text, x, y, parent) {
   return g;
 }
 const locks = new Map();
+{ const g = new THREE.Group(); scene.add(g); fenceRun(WORLD.x0 + .6, -.4, -.4, -.4, g, .75); fenceRun(20.4, -.4, WORLD.x1 - .6, -.4, g, .75); fenceRun(-.4, -.4, -.4, WORLD.y0 + .6, g, .75); fenceRun(20.4, -.4, 20.4, WORLD.y0 + .6, g, .75); bakeMerge(g); }
 for (const [zid, z] of Object.entries(ZONES)) {
   if (!z.land) continue;
   const g = new THREE.Group(); scene.add(g);
   const [x0, y0, x1, y1] = z.rect;
-  if (zid === 'field') fenceRun(x1 + .2, y0 + .3, x1 + .2, y1 - .2, g, .75);
-  if (zid === 'pasture') fenceRun(x0 - .2, y0 + .3, x0 - .2, y1 - .2, g, .75);
-  if (zid === 'garden') fenceRun(x0 + .3, y1 + .2, x1 - .3, y1 + .2, g, .75);
+  if (zid === 'field') fenceRun(x1 - .4, y0 + .3, x1 - .4, y1 - .2, g, .75);
+  if (zid === 'pasture') fenceRun(x0 + .4, y0 + .3, x0 + .4, y1 - .2, g, .75);
+  if (zid === 'garden') fenceRun(x0 + .3, y1 - .4, x1 - .3, y1 - .4, g, .75);
   bakeMerge(g);
   const d = DEF[z.land];
-  const sx = zid === 'field' ? x1 - 1.2 : zid === 'pasture' ? x0 + 1.2 : d.x + 2.4, sy = zid === 'garden' ? y1 - 1.2 : d.y - .4;
+  const sx = zid === 'field' ? x1 - 1.8 : zid === 'pasture' ? x0 + 1.8 : d.x + 2.4, sy = zid === 'garden' ? y1 - 1.8 : d.y - .4;
   signBoard(z.title, sx, sy, g);
   locks.set(zid, g);
 }
@@ -884,13 +886,15 @@ function chunks(items, size = 14) {
 }
 function cullable(im) { im.computeBoundingSphere(); im.frustumCulled = true; return im; }
 // forest around the farm: instanced copies of the tree models
+const instMats = new Map(); // one set of materials per model part, shared by all chunks
 function instancedModel(name, spots, colorFor) {
   const a = A[name]; a.scene.updateMatrixWorld(true);
   const parts = [];
   a.scene.traverse(m => { if (m.isMesh) parts.push(m); });
   for (const part of parts) {
     const mats = Array.isArray(part.material) ? part.material : [part.material];
-    const im = new THREE.InstancedMesh(part.geometry, mats.map(mm => { const c = mm.clone(); if (colorFor(mm.name)) c.color.set('#ffffff'); return c; }), spots.length);
+    if (!instMats.has(part)) instMats.set(part, mats.map(mm => { const c = mm.clone(); if (colorFor(mm.name)) c.color.set('#ffffff'); return c; }));
+    const im = new THREE.InstancedMesh(part.geometry, instMats.get(part), spots.length);
     im.castShadow = true; im.receiveShadow = true;
     spots.forEach(([x, y, h, rot, tint], i) => {
       const s = h / a.size.y;
@@ -917,9 +921,15 @@ function instancedModel(name, spots, colorFor) {
 // ---------- input ----------
 let moved = false;
 let upBtn = null; // screen circle of the upgrade button: { x, y, r, id }
+// a short tap on the upgrade button opens the card; a drag that starts on it still steers
+let tap = null;
 ov.addEventListener('pointerdown', e => {
-  if (upBtn && Math.hypot(e.clientX - upBtn.x, e.clientY - upBtn.y) < upBtn.r + 10) { if (typeof openUpgrades === 'function') openUpgrades(upBtn.id); return; }
+  tap = upBtn && Math.hypot(e.clientX - upBtn.x, e.clientY - upBtn.y) < upBtn.r + 10 ? { x: e.clientX, y: e.clientY, t: performance.now(), id: upBtn.id } : null;
   joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }; ov.setPointerCapture(e.pointerId);
+});
+ov.addEventListener('pointerup', e => {
+  if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 14 && performance.now() - tap.t < 400 && typeof openUpgrades === 'function') openUpgrades(tap.id);
+  tap = null;
 });
 ov.addEventListener('pointermove', e => { if (joy && e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; if (Math.hypot(joy.x - joy.ox, joy.y - joy.oy) > 20) moved = true; } });
 const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
@@ -939,7 +949,8 @@ let firstSync = true; // things already built when the game loads appear without
 function sync() {
   camera.position.set(camX, Math.sin(PITCH) * camDist, camY + 1.2 + Math.cos(PITCH) * camDist);
   camera.lookAt(camX, 0, camY + 1.2);
-  sun.position.set(camX - 6, 22, camY + 11); sun.target.position.set(camX, 0, camY);
+  const sx = Math.round(camX / 6) * 6, sy = Math.round(camY / 6) * 6; // steps, so shadow edges do not crawl every frame
+  sun.position.set(sx - 6, 22, sy + 11); sun.target.position.set(sx, 0, sy);
 
   // buildings that appear when bought
   for (const [id, objs] of shown) {
@@ -965,6 +976,7 @@ function sync() {
   for (const [a, p] of people) if (!p.seen) { scene.remove(p.g); mixers.delete(p.mixer); people.delete(a); }
 
   // animals
+  for (const [c, m] of animalMeshes) if (!penList.some(p => p.animals.includes(c))) { scene.remove(m.g); mixers.delete(m.mixer); animalMeshes.delete(c); }
   for (const pen of penList) for (const c of pen.animals) {
     let m = animalMeshes.get(c);
     if (!m) { m = makeAnimal(pen.animal); animalMeshes.set(c, m); }
@@ -1153,7 +1165,6 @@ function patienceBar(x, y, w, f) {
   rr(o, x - w / 2, y, w, 7, 3.5); o.fillStyle = 'rgba(0,0,0,.35)'; o.fill();
   rr(o, x - w / 2, y, w * f, 7, 3.5); o.fillStyle = f > .5 ? '#6ad44f' : f > .25 ? '#f4b52c' : '#ec4a3c'; o.fill();
 }
-const fmtN = n => n >= 10000 ? (n / 1000).toFixed(1).replace('.', ',') + 'к' : String(n);
 function upArrow(x, y, s, col) {
   o.beginPath(); o.moveTo(x, y - s); o.lineTo(x + s * .85, y); o.lineTo(x + s * .35, y); o.lineTo(x + s * .35, y + s * .8); o.lineTo(x - s * .35, y + s * .8); o.lineTo(x - s * .35, y); o.lineTo(x - s * .85, y); o.closePath();
   o.fillStyle = col; o.fill();
@@ -1296,7 +1307,7 @@ function render(dt = 0) {
 }
 
 // ---------- loop ----------
-const resumed = load();
+load();
 let last = performance.now();
 // automatic quality: while the game runs slowly, step down: AO off -> lower resolution -> smaller shadows -> lowest resolution
 let perfT = 0, perfN = 0, perfStage = QUALITY ? 9 : 0, fpsEma = 60;
@@ -1337,6 +1348,6 @@ function frame(t) {
 }
 requestAnimationFrame(frame);
 window.__game = { G, player, stalls, stallList, pens, convs, plants, PADS, DEFS, DEF, TRACKS, buy, buyUpgrade, update, helpers, customers, render, padVisible, padPaid, derive, save, resetFarm,
-  ready: true, scene, gfx: GFX, charOf: (a) => people.get(a), fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }), setCam: (x, y) => { camX = x; camY = y; } };
+  ready: true, scene, gfx: GFX, upBtn: () => upBtn, charOf: (a) => people.get(a), fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }), setCam: (x, y) => { camX = x; camY = y; } };
 document.getElementById('loading')?.remove();
-uiInit(resumed);
+uiInit();

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-export function loadGame(seed = 1, store = {}) {
+export function loadGame(seed = 1, store = {}, { autoload = true } = {}) {
   let r = seed; // deterministic randomness, so a failure can be replayed
   const M = Object.create(Math); M.random = () => (r = (r * 16807) % 2147483647) / 2147483647;
   const el = () => ({ hidden: true, onclick: null, textContent: '' });
@@ -19,7 +19,7 @@ export function loadGame(seed = 1, store = {}) {
   vm.runInContext(src + `
 ;globalThis.__g = { G, player, stalls, stallList, pens, penList, convs, convList, plants, PLANT_GROUPS, PRODUCER, DEFS, DEF, PADS, TRACKS, ZONES, update, helpers, customers,
   padVisible, padPaid, load, save, resetFarm, built, lvl, upgradeCost, buyUpgrade, consumers, nearbyUpgrade, upgradeAnchor, priceOf, hasCashier, SAVE_KEY };`, ctx);
-  ctx.__g.load();
+  if (autoload) ctx.__g.load();
   return { g: ctx.__g, els, store, ctx };
 }
 

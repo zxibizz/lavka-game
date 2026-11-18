@@ -129,6 +129,38 @@ test('the farm survives a reload: buildings, upgrades, money and shelves', () =>
   assert.ok(b.g.G.coinsEver > coins);
 });
 
+test('nothing is saved before the farm has loaded (slow start must not wipe it)', () => {
+  const a = loadGame(1);
+  play(a.g, 300); a.g.save();
+  const before = a.store[a.g.SAVE_KEY];
+  const b = loadGame(1, a.store, { autoload: false });
+  b.g.save(); // the 2 s timer firing while the 3D models still load
+  assert.equal(a.store[a.g.SAVE_KEY], before);
+  b.g.load();
+  assert.equal(b.g.G.coins, a.g.G.coins);
+});
+
+test('a product that is cooking survives a reload', () => {
+  const a = loadGame(1);
+  a.g.G.built.add('oven'); a.g.G.coins = 100; a.g.buyUpgrade('coop', 'hens');
+  const c = a.g.convs.oven; c.store.egg = 1; c.store.wood = 1; a.g.update(1 / 30);
+  assert.ok(c.cook > 0); a.g.save();
+  const b = loadGame(1, { ...a.store });
+  const d = b.g.convs.oven;
+  for (let i = 0; i < 30 * 4; i++) b.g.update(1 / 30);
+  assert.equal(d.out_n, 1, 'the pie comes out after the reload');
+});
+
+test('the player cannot slip out of the owned land through the corners', () => {
+  const { g } = loadGame(1);
+  const p = g.player;
+  for (const [x, y, dx, dy] of [[.4, .4, -1, -1], [19.6, .4, 1, -1], [.4, 5, -1, 0], [10, .4, 0, -1]]) {
+    p.x = x; p.y = y;
+    for (let i = 0; i < 90; i++) { p.x += dx * .15; p.y += dy * .15; g.update(1 / 30); }
+    assert.ok(p.x > 0 && p.x < 20 && p.y > 0, `escaped to ${p.x.toFixed(2)}, ${p.y.toFixed(2)}`);
+  }
+});
+
 test('starting over clears the farm; saves from the old level mode are dropped', () => {
   const a = loadGame(1);
   play(a.g, 300);
