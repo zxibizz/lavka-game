@@ -1,6 +1,6 @@
 'use strict';
 // Bump together with VERSION in sw.js whenever anything in public/ changes.
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 // Game state and simulation. No rendering here: view.js draws the world.
 let camX = 10, camY = 14;
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -318,10 +318,8 @@ function update(dt) {
   if (keys['arrowup'] || keys['w'] || keys['ц']) iy -= 1;
   if (keys['arrowdown'] || keys['s'] || keys['ы']) iy += 1;
   if (joy) {
-    let jx = (joy.x - joy.ox) / JOY_R, jy = (joy.y - joy.oy) / JOY_R;
-    const l = Math.hypot(jx, jy);
-    if (l > 1) { jx /= l; jy /= l; }
-    if (l > .12) { const m = Math.min(1, l) / l; ix = jx * m; iy = jy * m; } // screen up = north in the 3D view
+    const jx = (joy.x - joy.ox) / JOY_R, jy = (joy.y - joy.oy) / JOY_R, l = Math.hypot(jx, jy);
+    if (l > .12) { ix = jx / l; iy = jy / l; } // direction only: one speed however far the finger goes; screen up = north
   }
   moveActor(player, ix, iy, player.speed, dt);
   collide(player, .3);

@@ -102,6 +102,18 @@ test('a level in progress survives a reload', () => {
   assert.equal(c.g.load(), false, 'quitting forgets the run');
 });
 
+test('the joystick sets direction only: a short drag moves as fast as a long one', () => {
+  const run = (dy) => {
+    const { g, ctx } = loadGame(); g.startLevel(0);
+    vm.runInContext(`joy = { id: 1, ox: 100, oy: 300, x: 100, y: ${300 - dy} }`, ctx);
+    const y0 = g.player.y; for (let i = 0; i < 15; i++) g.update(1 / 30);
+    return y0 - g.player.y;
+  };
+  const short = run(20), long = run(120);
+  assert.ok(short > 1, 'a short drag moves');
+  assert.ok(Math.abs(short - long) < 1e-9, `same distance: ${short} vs ${long}`);
+});
+
 test('the touch joystick moves the player', () => {
   const { g, ctx } = loadGame();
   g.startLevel(0);

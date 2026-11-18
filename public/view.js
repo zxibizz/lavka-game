@@ -474,6 +474,10 @@ function bakeMerge(root, keep = () => false) {
 
 // ---------- characters ----------
 const CHAR_H = 1.85, HEAD_SCALE = 1.3, CHUNK = 1.14;
+// Ground speed the feet cover at timeScale 1, in world units/s at CHAR_H (measured from foot travel while planted,
+// ~/scripts/stack-proto/stride.py). Animation speed = movement speed / this, so the feet do not slide.
+const STRIDE_K = Number(new URLSearchParams(location.search).get('stride')) || 1.12; // 1.12: least planted-foot slide (slide2.py); ?stride= to retune
+const STRIDE = { womanA: { Run: 2.19, Walk: 1.1 }, womanB: { Run: 2.18, Walk: 1.1 }, casual: { Run: 2.6, Walk: 1.36 }, hoodie: { Run: 2.58, Walk: 1.35 }, farmer: { Run: 2.6, Walk: 1.36 } };
 const NOT_CLOTHES = /^(Skin|Skin_Darker|Eye|Eyebrows|Hair.*)$/;
 function makeChar({ model: name, shirt, pants, hair }) {
   const a = A[name], o = SkeletonUtils.clone(a.scene), s = CHAR_H / a.size.y;
@@ -503,7 +507,8 @@ function makeChar({ model: name, shirt, pants, hair }) {
   box(axe, .05, .55, .05, '#8a5a2b', 0, .22, 0);
   box(axe, .05, .2, .24, '#c3cbd3', 0, .45, .1);
   axe.visible = false;
-  return { g, mixer, actions, cur: 'Idle', head: o.getObjectByName('Head'), wrist, axe, axeFixed: false };
+  const st = STRIDE[name] || STRIDE.casual, k = STRIDE_K;
+  return { g, mixer, actions, cur: 'Idle', head: o.getObjectByName('Head'), wrist, axe, axeFixed: false, stride: { Run: st.Run * CHUNK * k, Walk: st.Walk * CHUNK * k } };
 }
 function setAnim(c, n, ts = 1) {
   const next = c.actions[n] || c.actions.Idle;
@@ -515,7 +520,7 @@ function posePerson(c, a, run = true) {
   c.g.rotation.y = Math.PI / 2 - a.dir;
   const sp = Math.hypot(a.vx || 0, a.vy || 0);
   if (a.chopping) setAnim(c, 'Sword_Slash', 1.5);
-  else if (sp > .35) setAnim(c, run ? 'Run' : 'Walk', run ? Math.max(.6, sp / 5) : Math.max(.6, sp / 1.7));
+  else if (sp > .35) { const clip = run ? 'Run' : 'Walk'; setAnim(c, clip, Math.max(.4, sp / c.stride[clip])); }
   else setAnim(c, 'Idle');
   c.axe.visible = !!a.chopping;
   if (c.axe.visible && !c.axeFixed) { // undo bone/world scaling so the axe keeps its size
@@ -1066,6 +1071,6 @@ function frame(t) {
   }
 }
 requestAnimationFrame(frame);
-window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, scene, gfx: GFX, fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }) };
+window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, scene, gfx: GFX, charOf: (a) => people.get(a), fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }) };
 document.getElementById('loading')?.remove();
 uiInit(resumed);
