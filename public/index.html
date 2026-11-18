@@ -41,6 +41,29 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 #pauseBtn i{width:6px;height:18px;border-radius:2px;background:#fff}
 
 .gfx{margin-top:14px;font-size:15px;color:#6d675a;display:flex;align-items:center;justify-content:center;gap:8px}.gfx .btn.on{background:#4cbb45;color:#fff;box-shadow:0 3px 0 #2f8c2c}
+.ic{width:30px;height:30px;vertical-align:middle;flex:none}.ic.s{width:18px;height:18px}.ic.big{width:46px;height:46px}
+.cash{display:inline-flex;align-items:center;gap:3px}
+.screen.sheet{align-items:flex-end;background:rgba(25,45,20,.18)}
+.sheet .card{max-height:72%;border-radius:26px 26px 18px 18px}
+.list{list-style:none;padding:0;margin:6px 0 10px;text-align:left}
+.list li{display:flex;align-items:center;gap:10px;background:#f2ead6;border-radius:14px;padding:8px 10px;margin:6px 0}
+.list li .u-text{flex:1;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:2px 8px}.list li .u-text b{font-size:16px}.list li .u-text span{flex-basis:100%;font-size:13px;color:#6d675a;margin-left:38px}
+.list li.grid{display:flex;flex-wrap:wrap;gap:8px}.list li.grid span{display:flex;align-items:center;gap:2px;background:#fffaf0;border-radius:10px;padding:2px 8px 2px 2px}
+.need{font-style:normal;white-space:nowrap}.need.miss{color:#d0442f}
+#shopTabs{margin-bottom:6px}#shopTabs .on{background:#4cbb45;color:#fff;box-shadow:0 3px 0 #2f8c2c}
+#shopList{list-style:none;padding:0;margin:6px 0 10px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.shopItem{background:#f2ead6;border-radius:14px;padding:8px 4px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer}
+.shopItem b{font-size:14px}.shopItem span{font-size:11px;color:#8a8576;min-height:13px}.shopItem .price{font-size:14px}
+.shopItem.locked{opacity:.5}.shake{animation:shake .35s}@keyframes shake{25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+#buildBtn{position:fixed;right:14px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:2;border:0;border-radius:22px;background:#4cbb45;box-shadow:0 4px 0 #2f8c2c;color:#fff;font:900 16px Nunito,system-ui;display:flex;align-items:center;gap:6px;padding:10px 16px 10px 12px;cursor:pointer;touch-action:manipulation}
+#buildBtn[hidden],#placeBar[hidden],#seedBar[hidden]{display:none}
+#buildBtn svg{width:24px;height:24px}
+#placeBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom));z-index:2;display:flex;align-items:center;gap:12px;background:rgba(25,30,45,.65);border-radius:26px;padding:8px;color:#fff;font:900 14px Nunito,system-ui}
+#placeBar .btn{padding:10px 18px;font-size:20px}
+#seedBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));z-index:2;display:flex;gap:8px;background:rgba(25,30,45,.55);border-radius:20px;padding:8px}
+.seed{border:0;border-radius:14px;background:#fffaf0;padding:4px 6px;display:flex;flex-direction:column;align-items:center;font:900 11px Nunito,system-ui;color:#5d5747;touch-action:manipulation;cursor:pointer}
+.seed.on{background:#c9f2b5;box-shadow:0 0 0 3px #4cbb45}.seed:disabled{opacity:.4}
+#levelList{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:8px 0 14px}#levelList span{display:flex;flex-direction:column;align-items:center;font-size:13px;width:84px}
 .stats{font-size:15px;color:#6d675a;margin:8px 0 14px;line-height:1.4}.stats b{color:#2f6b28}
 #pauseFps{font-size:12px;color:#a19b8a;margin-top:10px}
 </style>
@@ -49,6 +72,9 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
 <button id="pauseBtn" hidden aria-label="Пауза"><i></i><i></i></button>
+<button id="buildBtn" hidden aria-label="Стройка"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9H3z" fill="#fff"/><rect x="9.5" y="13" width="5" height="7" fill="#4cbb45"/></svg><span>Стройка</span></button>
+<div id="placeBar" hidden><button id="placeNo" class="btn alt">✕</button><span>Двигай пальцем</span><button id="placeOk" class="btn">✓</button></div>
+<div id="seedBar" hidden></div>
 <div id="pause" class="screen" hidden><div class="card">
   <h1 style="font-size:30px">Лавочка</h1>
   <div id="pauseStats" class="stats"></div>
@@ -57,11 +83,29 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
   <button id="pauseReset" class="btn alt small" style="margin-top:16px">Начать ферму заново</button>
   <div id="pauseFps"></div>
 </div></div>
-<div id="upgrades" class="screen" hidden><div class="card">
-  <h1 id="upTitle" style="font-size:26px"></h1>
-  <div class="bankrow"><span id="upBank"></span></div>
-  <ul id="upList"></ul>
-  <button id="upClose" class="btn wide">Готово</button>
+<div id="card" class="screen sheet" hidden><div class="card">
+  <h1 id="cardTitle" style="font-size:26px"></h1>
+  <div id="cardSub" class="stats"></div>
+  <ul id="cardList" class="list"></ul>
+  <div class="row"><button id="cardMove" class="btn alt small">Переставить</button><button id="cardSell" class="btn alt small">Убрать</button><button id="cardClose" class="btn small">Готово</button></div>
+</div></div>
+<div id="shop" class="screen sheet" hidden><div class="card">
+  <h1 style="font-size:26px">Стройка</h1>
+  <div class="bankrow"><span id="shopBank"></span></div>
+  <div id="shopTabs" class="row"><button class="btn small alt" data-tab="farm">Ферма</button><button class="btn small alt" data-tab="factory">Фабрики</button><button class="btn small alt" data-tab="decor">Украшения</button></div>
+  <ul id="shopList"></ul>
+  <button id="shopClose" class="btn wide">Закрыть</button>
+</div></div>
+<div id="levelup" class="screen" hidden><div class="card">
+  <h1 id="levelNum"></h1>
+  <div class="stats">Теперь можно:</div>
+  <div id="levelList"></div>
+  <button id="levelOk" class="btn wide">Ура!</button>
+</div></div>
+<div id="away" class="screen" hidden><div class="card">
+  <h3>С возвращением!</h3>
+  <p id="awayText" class="stats"></p>
+  <button id="awayOk" class="btn wide">Играть</button>
 </div></div>
 <div id="reset" class="screen" hidden><div class="card">
   <h3>Начать заново?</h3>

@@ -1,14 +1,17 @@
-// Headless game loader and a simple bot, shared by the tests and test/pacing.mjs.
+// Headless game loader with a controllable clock, and a simple bot; shared by the tests and test/pacing.mjs.
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-export function loadGame(seed = 1, store = {}, { autoload = true } = {}) {
+// The game runs on the wall clock (Date.now). Here the clock is fake: step() advances it together with update().
+export function loadGame(seed = 1, store = {}, { autoload = true, start = 1.8e12 } = {}) {
   let r = seed; // deterministic randomness, so a failure can be replayed
   const M = Object.create(Math); M.random = () => (r = (r * 16807) % 2147483647) / 2147483647;
+  const clock = { t: start };
+  const FakeDate = { now: () => clock.t };
   const el = () => ({ hidden: true, onclick: null, textContent: '' });
   const els = {};
   const ctx = {
-    console, Math: M, JSON, Set, Map, Object, Array, Number, String,
+    console, Math: M, JSON, Set, Map, Object, Array, Number, String, Uint8Array, Int32Array, Date: FakeDate,
     addEventListener() {}, setInterval() {}, confirm: () => false,
     location: { reload() {} },
     document: { getElementById: (id) => (els[id] ||= el()), hidden: false },
@@ -17,99 +20,88 @@ export function loadGame(seed = 1, store = {}, { autoload = true } = {}) {
   vm.createContext(ctx);
   const src = fs.readFileSync(new URL('../public/game.js', import.meta.url), 'utf8');
   vm.runInContext(src + `
-;globalThis.__g = { G, player, stalls, stallList, pens, penList, convs, convList, plants, PLANT_GROUPS, PRODUCER, DEFS, DEF, PADS, TRACKS, ZONES, update, helpers, customers,
-  padVisible, padPaid, load, save, resetFarm, built, lvl, upgradeCost, buyUpgrade, consumers, nearbyUpgrade, upgradeAnchor, priceOf, hasCashier, SAVE_KEY };`, ctx);
-  if (autoload) ctx.__g.load();
-  return { g: ctx.__g, els, store, ctx };
+;globalThis.__g = { G, player, CATALOG, CROPS, RECIPES, ITEM, ANIMALS, TASKS, update, helpers, customers, stallState, load, save, resetFarm,
+  build, canBuy, canPlace, freeSpot, moveBuilding, plant, enqueue, speedUp, timeLeft, fieldState, penCap, buyAnimal, buySlot, buyUpgrade, upgradeCost,
+  hireCashier, hireWorker, cashierCost, workerCost, curTask, have, barnUsed, front, center, nearestBuilding, tickAll, findPath, xpFor, SAVE_KEY,
+  get B() { return B; } };`, ctx);
+  const g = ctx.__g;
+  // advance the clock and the simulation together
+  g.step = (seconds, dt = 1 / 30) => { for (let i = 0; i < seconds / dt; i++) { clock.t += dt * 1000; g.update(dt); } };
+  g.skip = (seconds) => { clock.t += seconds * 1000; }; // time passes with the game closed
+  g.clock = clock;
+  if (autoload) g.load();
+  return { g, els, store, ctx, clock };
 }
 
-// Plays like a sensible person: buys what is affordable, keeps every shelf stocked (fetching inputs for the
-// workshops when a product runs out), stands at a counter while a customer waits, collects the money.
-// Upgrades are bought from the menu without walking to the building (the only shortcut it takes).
-export function play(g, seconds, { log = [], upgrades = true } = {}) {
+// Plays like a sensible person: sows (the slowest, most valuable crop it can afford), harvests, carries everything to
+// the barn, keeps workshops busy, stands at the counter while customers wait, builds in a fixed order and buys
+// useful upgrades. Placement takes the first free spot near the barn.
+const BUILD_ORDER = ['mill', 'bench', 'stall', 'bakery', 'flowers', 'cowshed', 'dairy', 'lamp', 'stall', 'juicer', 'well', 'sweets', 'fountain'];
+export function play(g, seconds, { log = [] } = {}) {
   const p = g.player, G = g.G;
-  const open = () => g.stallList.filter((s) => g.built(s.id));
-  // walks straight, through the lane in front of the stalls when crossing the market; sidesteps when stuck
-  let detour = null, best = 1e9, still = 0;
-  const go = (x, y) => {
-    if (Math.hypot(x - p.x, y - p.y) < .3) { detour = null; best = 1e9; still = 0; return true; }
-    let tx = x, ty = y;
-    if (Math.abs(x - p.x) > .8 && (p.y > 18.1 || y > 18.1)) { tx = p.y > 17.3 ? p.x : x; ty = 17; }
-    if (detour) { tx = detour.x; ty = detour.y; if (--detour.n <= 0) detour = null; }
-    const dx = tx - p.x, dy = ty - p.y, d = Math.hypot(dx, dy), st = p.speed / 30;
-    if (d > 1e-6) { p.x += dx / d * Math.min(st, d); p.y += dy / d * Math.min(st, d); }
-    const left = Math.hypot(x - p.x, y - p.y);
-    if (left < best - .05) { best = left; still = 0; } else if (++still > 45 && !detour) {
-      const s = Math.random() < .5 ? 1 : -1; detour = { x: p.x - dy / (d || 1) * 3 * s, y: p.y + dx / (d || 1) * 3 * s, n: 30 }; still = 0;
-    }
-    return false;
+  const barn = () => g.B.find((b) => b.type === 'barn');
+  const go = (x, y) => { const dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy), st = p.speed / 30; if (d > .25) { p.x += dx / d * Math.min(st, d); p.y += dy / d * Math.min(st, d); return false; } return true; };
+  let task = null, path = [];
+  const goPath = (x, y) => {
+    if (!path.length && !task.routed) { path = g.findPath(p.x, p.y, x, y); task.routed = true; }
+    while (path.length && go(...path[0])) path.shift();
+    return !path.length && go(x, y);
   };
-  const nearestPlant = (group) => {
-    let best = null, bd = 1e9;
-    for (const t of g.plants) if (t.active && t.logs > 0 && t.group === group && !(skip.has(t))) { const d = Math.hypot(t.x - p.x, t.y - p.y); if (d < bd) { bd = d; best = t; } }
-    return best;
-  };
-  const skip = new Set();
-  function fetchPlan(item, depth = 0) {
-    const [kind, id] = g.PRODUCER[item];
-    if (!g.built(id)) return null;
-    if (kind === 'pen') { const pen = g.pens[id]; return pen.stock > 0 ? { k: 'gather', x: pen.pile.x, y: pen.pile.y, item } : null; }
-    if (kind === 'plants') { const t = nearestPlant(id); return t ? { k: 'gather', x: t.x, y: t.y + .6, item, plant: t } : null; }
-    const c = g.convs[id];
-    if (c.out_n > 0) return { k: 'gather', x: c.OUT.x, y: c.OUT.y, item };
-    if (depth > 2) return null;
-    for (const k of Object.keys(c.in).sort((a, b) => c.store[a] - c.store[b])) {
-      if (c.store[k] >= c.max) continue;
-      const q = fetchPlan(k, depth + 1); if (q) return q;
-    }
-    return null;
-  }
-  let task = null;
-  const seen = new Set(G.built);
-  const t0 = G.time;
+  // what the barn has least of among the quick crops (workshops need a bit of everything)
+  const bestCrop = () => Object.entries(g.CROPS).filter(([, c]) => G.lvl >= c.lvl && c.seed <= G.coins && c.t <= 600).sort((a, b) => g.have(a[0]) - g.have(b[0]))[0]?.[0] || 'wheat';
   for (let i = 0; i < seconds * 30; i++) {
-    if (task && i - task.since > 30 * 15) { if (task.plant) skip.add(task.plant); task = null; } // stuck: try something else
-    if (i % 300 === 0) skip.clear();
-    if (upgrades && i % 15 === 0) { // cheapest upgrade, while it is small next to the savings
-      let best = null;
-      for (const id of Object.keys(g.TRACKS)) if (g.built(id)) for (const t of g.TRACKS[id]) {
-        const c = g.upgradeCost(id, t.key); if (c !== null && (!best || c < best.c)) best = { id, key: t.key, c };
+    if (i % 30 === 0) { // decisions that need no walking: build, queue workshops, upgrades
+      // the first step of the order that is not built yet (and not locked by level)
+      const seen = {};
+      const next = BUILD_ORDER.find((t) => { seen[t] = (seen[t] || 0) + 1; const c = g.canBuy(t); return (t === 'stall' ? G.stalls : g.B.filter((b) => b.type === t).length) < seen[t] && c !== 'lvl' && c !== 'limit'; });
+      if (next && g.canBuy(next) === 'ok') {
+        const b0 = barn(), spot = next === 'stall' ? {} : g.freeSpot(next, b0.x + 2, b0.y - 3);
+        if (spot && g.build(next, spot.x, spot.y)) log.push({ t: g.clock.t, id: next, lvl: G.lvl });
       }
-      if (best && best.c <= G.coins * .35 && g.buyUpgrade(best.id, best.key)) log.push({ t: G.time, id: best.id + '.' + best.key, cost: best.c });
+      if (g.canBuy('field') === 'ok' && G.coins > g.CATALOG.field.cost(g.B.filter((b) => b.type === 'field').length) * 3) {
+        const b0 = barn(), spot = g.freeSpot('field', b0.x + 8, b0.y - 2);
+        if (spot && g.build('field', spot.x, spot.y)) log.push({ t: g.clock.t, id: 'field', lvl: G.lvl });
+      }
+      for (const b of g.B) if (g.RECIPES[b.type]) {
+        const order = g.RECIPES[b.type].map((r, k) => k).sort((a, c) => g.RECIPES[b.type][c].t - g.RECIPES[b.type][a].t);
+        for (const k of order) while (g.enqueue(b, k));
+      }
+      for (const b of g.B) if (g.CATALOG[b.type].kind === 'pen' && G.coins > (g.curTask().ev === 'animal' ? 0 : 400)) g.buyAnimal(b);
+      for (const key of ['barn', 'bag']) { const c = g.upgradeCost(key); if (c !== null && G.coins > c * 2 && g.barnUsed() > G.barnCap * .6) g.buyUpgrade(key); }
+      for (let k = 0; k < G.stalls; k++) { const c = g.cashierCost(k); if (c !== null && G.coins > c * 1.5) g.hireCashier(k); }
+      { const c = g.workerCost(); if (c !== null && G.coins > c * 1.3) g.hireWorker(); }
     }
+    if (task && i - task.since > 30 * 20) task = null;
     if (!task) {
-      const pad = g.PADS.filter((q) => g.padVisible(q) && G.coins + g.padPaid(q) >= q.cost).sort((a, b) => a.cost - b.cost)[0];
-      const waiting = open().find((s) => !g.hasCashier(s) && s.shelf > 0 && s.queue[0] && s.queue[0].arrived && s.queue[0].pat < s.queue[0].patMax * .6);
-      const rich = open().find((s) => s.coins >= 8 + G.time / 60);
-      if (pad) task = { k: 'pad', x: pad.x, y: pad.y, id: pad.id };
-      else if (waiting) task = { k: 'drop', x: waiting.drop.x, y: waiting.drop.y, s: waiting };
-      else if (rich) task = { k: 'coins', x: rich.cz.x, y: rich.cz.y, s: rich };
-      else if (p.stack.length) {
-        const types = [...new Set(p.stack.map((s) => s.t))];
-        const opts = types.flatMap((t) => g.consumers(t).filter((o) => o.fill < 1)).sort((a, b) => a.fill - b.fill);
-        if (opts.length) {
-          const o = opts[0];
-          task = o.kind === 'stall' ? { k: 'drop', x: o.st.drop.x, y: o.st.drop.y, s: o.st } : { k: 'feed', x: o.c.IN.x, y: o.c.IN.y, c: o.c };
-        } else p.stack.length = 0; // nothing takes it: drop it
-      } else {
-        const needs = open().sort((a, b) => a.shelf / a.max - b.shelf / b.max);
-        for (const st of needs) { const q = fetchPlan(st.type); if (q) { task = q; break; } }
-      }
+      const s = g.clock.t / 1000;
+      const open = g.stallState.slice(0, G.stalls);
+      const waiting = open.find((st, k) => !G.cashiers[k] && st.queue[0] && st.queue[0].arrived && g.have(st.queue[0].item) > 0);
+      const rich = open.find((st) => st.coins >= 15);
+      const ripe = g.B.filter((b) => b.type === 'field' && g.fieldState(b, s) === 'ripe');
+      const empty = g.B.filter((b) => b.type === 'field' && g.fieldState(b, s) === 'empty');
+      const ready = g.B.filter((b) => (b.out && b.out.length) || b.stock >= 3);
+      if (p.stack.length >= p.cap || (p.stack.length && !ripe.length && !ready.length)) { const f = g.front(barn()); task = { k: 'barn', x: f.x, y: f.y }; }
+      else if (waiting) task = { k: 'sell', x: waiting.counter.x, y: waiting.counter.y, st: waiting };
+      else if (rich) task = { k: 'coins', x: rich.cz.x, y: rich.cz.y, st: rich };
+      else if (ripe.length) { const c = g.center(ripe[0]); task = { k: 'field', x: c.x, y: c.y, b: ripe[0] }; }
+      else if (ready.length) { const f = g.front(ready[0]); task = { k: 'pick', x: f.x, y: f.y, b: ready[0] }; }
+      else if (empty.length) { G.seed = bestCrop(); const c = g.center(empty[0]); task = { k: 'plant', x: c.x, y: c.y, b: empty[0] }; }
+      else { const st = open[0]; task = { k: 'sell', x: st.counter.x, y: st.counter.y, st, idle: true }; }
+      task.since = i; path = [];
     }
-    if (task && task.since === undefined) { task.since = i; best = 1e9; still = 0; detour = null; }
-    if (task && task.k === 'gather' && p.stack.length >= p.cap) task = null;
-    if (task && go(task.x, task.y)) {
+    if (goPath(task.x, task.y)) {
       task.here = (task.here || 0) + 1 / 30;
-      const done = task.k === 'pad' ? (g.built(task.id) || G.coins === 0)
-        : task.k === 'coins' ? task.s.coins === 0
-        : task.k === 'drop' ? ((!p.stack.some((s) => s.t === task.s.type) || task.s.shelf >= task.s.max)
-            && (g.hasCashier(task.s) || task.here > 10 || !(task.s.shelf > 0 && task.s.queue[0] && task.s.queue[0].entered)))
-        : task.k === 'feed' ? task.here > .8
-        : (p.stack.length >= p.cap || task.here > 3 || (task.plant && task.plant.logs <= 0));
+      const s = g.clock.t / 1000;
+      const done = task.k === 'barn' ? !p.stack.length || task.here > 2
+        : task.k === 'sell' ? (task.here > (task.idle ? 3 : 8) || !(task.st.queue[0] && g.have(task.st.queue[0].item) > 0))
+        : task.k === 'coins' ? task.st.coins === 0
+        : task.k === 'field' ? g.fieldState(task.b, s) !== 'ripe' || p.stack.length >= p.cap
+        : task.k === 'plant' ? g.fieldState(task.b, s) !== 'empty' || task.here > 1
+        : (task.b.out ? !task.b.out.length : task.b.stock === 0) || p.stack.length >= p.cap || task.here > 2;
       if (done) task = null;
     }
+    g.clock.t += 1000 / 30;
     g.update(1 / 30);
-    for (const id of G.built) if (!seen.has(id)) { seen.add(id); log.push({ t: G.time, id, cost: g.DEF[id].cost }); }
   }
   return log;
 }

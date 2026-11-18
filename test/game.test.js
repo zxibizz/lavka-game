@@ -1,200 +1,189 @@
-// Runs the simulation (public/game.js) headless; the bot lives in test/bot.mjs.
+// Runs the simulation (public/game.js) headless on a fake clock; the bot lives in test/bot.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { loadGame, play } from './bot.mjs';
 
-const step = (g, s) => { for (let i = 0; i < s * 30; i++) g.update(1 / 30); };
+const ids = (g) => g.B.map((b) => b.type).sort().join(' ');
 
-test('a new farm starts small: an egg stall, a coop with one hen and the shed', () => {
+test('a new farm: barn, coop, four ripe wheat fields, one stall', () => {
   const { g } = loadGame(1);
-  assert.deepEqual([...g.G.built].sort(), ['coop', 'eggStall', 'shed']);
-  assert.equal(g.G.coins, 0);
-  assert.equal(g.pens.coop.n, 1);
-  assert.equal(g.pens.coop.animals.length, 1);
-  assert.ok(g.PADS.some((p) => p.id === 'grove') && !g.padVisible(g.DEF.grove), 'the grove waits for the first upgrade');
+  assert.equal(ids(g), 'barn coop field field field field');
+  assert.equal(g.G.stalls, 1);
+  assert.equal(g.G.lvl, 1);
+  assert.ok(g.B.filter((b) => b.type === 'field').every((b) => g.fieldState(b) === 'ripe'));
 });
 
-test('the bot grows the whole farm, every plot and building, in under 100 minutes', () => {
-  for (const seed of [1, 2]) {
-    const { g } = loadGame(seed);
-    const log = [];
-    for (let m = 0; m < 100 && g.DEFS.some((d) => d.id !== 'fair' && !g.built(d.id)); m++) play(g, 60, { log });
-    const missing = g.DEFS.filter((d) => d.id !== 'fair' && !g.built(d.id)).map((d) => d.id).join(' ');
-    assert.equal(missing, '', `seed ${seed}: not built after ${Math.round(g.G.time / 60)} min`);
-    // no long dry spells: something new (a pad or an upgrade) at least every 20 minutes
-    const times = [0, ...log.map((e) => e.t)];
-    const gap = Math.max(...times.slice(1).map((t, i) => t - times[i]));
-    assert.ok(gap < 20 * 60, `seed ${seed}: ${Math.round(gap / 60)} min without a purchase`);
-    assert.ok(g.G.rep >= 4, `seed ${seed}: rating ${g.G.rep}`);
-  }
-});
-
-test('the fair is reachable once everything else is built', () => {
-  const { g } = loadGame(3);
-  for (let m = 0; m < 100 && g.DEFS.some((d) => d.id !== 'fair' && !g.built(d.id)); m++) play(g, 60);
-  for (let m = 0; m < 60 && !g.built('fair'); m++) play(g, 60, { upgrades: false });
-  assert.ok(g.built('fair'), `fair not built after ${Math.round(g.G.time / 60)} min`);
-  assert.ok(g.G.fair);
-});
-
-test('upgrades cost coins, stay bought and change the game', () => {
+test('harvest goes into the basket, then into the barn; customers buy from the barn at the counter', () => {
   const { g } = loadGame(1);
-  g.G.coins = 100000;
-  const cap = g.player.cap, speed = g.player.speed;
-  assert.ok(g.buyUpgrade('coop', 'hens'));
-  assert.equal(g.pens.coop.n, 2); assert.equal(g.pens.coop.animals.length, 2);
-  assert.ok(g.buyUpgrade('shed', 'bag')); assert.equal(g.player.cap, cap + 2);
-  assert.ok(g.buyUpgrade('shed', 'boots')); assert.ok(g.player.speed > speed);
-  const price = g.priceOf(g.stalls.egg), max = g.stalls.egg.max;
-  for (let i = 0; i < 3; i++) assert.ok(g.buyUpgrade('eggStall', 'level'));
-  assert.ok(g.priceOf(g.stalls.egg) > price); assert.equal(g.stalls.egg.max, max + 12);
-  assert.equal(g.buyUpgrade('oven', 'speed'), false, 'only built buildings can be upgraded');
-  while (g.upgradeCost('coop', 'hens') !== null) assert.ok(g.buyUpgrade('coop', 'hens'));
-  assert.equal(g.buyUpgrade('coop', 'hens'), false, 'a track ends');
-  assert.equal(g.pens.coop.n, 8);
-  const { g: poor } = loadGame(1);
-  assert.equal(poor.buyUpgrade('coop', 'hens'), false, 'not without money');
+  const f = g.B.find((b) => b.type === 'field'), c = g.center(f), p = g.player;
+  p.x = c.x; p.y = c.y; g.step(1);
+  assert.equal(p.stack.length, 2, 'two wheat from one field');
+  assert.equal(g.fieldState(f), 'empty');
+  const barn = g.B.find((b) => b.type === 'barn'), fr = g.front(barn);
+  p.x = fr.x; p.y = fr.y; g.step(1);
+  assert.equal(p.stack.length, 0); assert.equal(g.have('wheat'), 2);
+  const st = g.stallState[0];
+  p.x = st.counter.x; p.y = st.counter.y;
+  g.step(40);
+  assert.ok(g.have('wheat') < 2, 'sold from the barn');
+  assert.ok(st.coins > 0 || g.G.coins > 30, 'paid');
 });
 
-test('the upgrade button shows for the building the player stands next to', () => {
+test('nobody comes to buy while the barn is empty', () => {
   const { g } = loadGame(1);
-  const nest = g.pens.coop.pile;
-  g.player.x = nest.x; g.player.y = nest.y + .3; step(g, .1);
-  assert.equal(g.G.upNear, 'coop');
-  g.player.x = g.stalls.egg.x - .9; g.player.y = 17.2; step(g, .1);
-  assert.equal(g.G.upNear, 'eggStall');
-  g.player.x = 10; g.player.y = 12; step(g, .1);
-  assert.equal(g.G.upNear, null);
+  g.player.x = 2; g.player.y = 14;
+  g.step(60);
+  assert.equal(g.customers.length, 0);
 });
 
-test('locked land cannot be entered until it is bought', () => {
-  const { g } = loadGame(1);
-  const p = g.player;
-  p.x = .5; p.y = 10;
-  for (let i = 0; i < 60; i++) { p.x -= .2; g.update(1 / 30); }
-  assert.ok(p.x > -.6, `walked into the field: x ${p.x}`);
-  // buy it on its pad
-  const { g: k } = loadGame(1);
-  for (const id of ['grove', 'woodStall', 'oven', 'pieStall']) k.G.built.add(id);
-  k.G.up['coop.hens'] = 1;
-  const pad = k.DEF.landField;
-  assert.ok(k.padVisible(pad));
-  k.G.coins = pad.cost; k.player.x = pad.x; k.player.y = pad.y;
-  step(k, 6);
-  assert.ok(k.built('landField'));
-  k.player.x = -3; k.player.y = 10; step(k, .5);
-  assert.ok(k.player.x < -2, 'the field is open now');
-});
-
-test('selling needs someone at the counter until a cashier is hired', () => {
-  const { g } = loadGame(1);
-  const st = g.stalls.egg;
-  st.shelf = 5; g.player.x = 4; g.player.y = 12;
-  step(g, 40);
-  assert.equal(st.shelf, 5, 'nothing sold while the player is away');
-  g.player.x = st.drop.x; g.player.y = st.drop.y;
-  step(g, 5);
-  assert.ok(st.shelf < 5, 'sold while the player stands in the sell zone');
-});
-
-test('workshops turn inputs into products and helpers carry them', () => {
-  const { g } = loadGame(1);
-  for (const id of ['grove', 'woodStall', 'oven', 'pieStall', 'helperEgg', 'helperWood', 'helperPie']) g.G.built.add(id);
-  g.G.up['coop.hens'] = 3;
-  g.G.coins = 200; assert.ok(g.buyUpgrade('coop', 'hens')); // a purchase applies what is built
-  assert.equal(g.helpers.length, 3);
-  g.player.x = 10; g.player.y = 13;
-  step(g, 120);
-  assert.ok(g.stalls.pie.shelf > 0 || g.stalls.pie.coins > 0 || g.convs.oven.out_n > 0, 'pies were baked and carried');
-  assert.ok(g.stalls.egg.shelf > 0, 'the egg helper stocks the egg stall');
-  assert.ok(g.stalls.wood.shelf > 0 || g.convs.oven.store.wood > 0, 'the wood helper chops and delivers');
-});
-
-test('the farm survives a reload: buildings, upgrades, money and shelves', () => {
+test('crops grow by the clock, also while the game is closed', () => {
   const a = loadGame(1);
-  play(a.g, 400);
+  const f = a.g.B.find((b) => b.type === 'field');
+  f.crop = null;
+  a.g.G.coins = 100;
+  assert.ok(a.g.plant(f, 'wheat'));
+  assert.equal(a.g.fieldState(f), 'growing');
   a.g.save();
-  const snap = JSON.parse(a.store[a.g.SAVE_KEY]);
-  const b = loadGame(1, { ...a.store });
-  assert.deepEqual([...b.g.G.built].sort(), [...a.g.G.built].sort());
-  assert.equal(JSON.stringify(b.g.G.up), JSON.stringify(a.g.G.up));
-  assert.equal(b.g.G.coins, a.g.G.coins);
-  assert.equal(b.g.stalls.egg.shelf, a.g.stalls.egg.shelf);
-  assert.equal(b.g.pens.coop.n, a.g.pens.coop.n);
-  assert.equal(b.g.helpers.length, a.g.helpers.length);
-  assert.equal(snap.v, 1);
-  // keeps working after the reload
-  const coins = b.g.G.coinsEver; play(b.g, 120);
-  assert.ok(b.g.G.coinsEver > coins);
+  const b = loadGame(1, { ...a.store }, { start: a.clock.t + 3 * 60 * 1000 }); // reopened 3 minutes later
+  const f2 = b.g.B.find((x) => x.id === f.id);
+  assert.equal(b.g.fieldState(f2), 'ripe');
+  assert.ok(b.g.G.away >= 179);
 });
 
-test('nothing is saved before the farm has loaded (slow start must not wipe it)', () => {
+test('hens lay while the game is closed, up to what the nest holds', () => {
   const a = loadGame(1);
-  play(a.g, 300); a.g.save();
+  const coop = a.g.B.find((b) => b.type === 'coop');
+  coop.stock = 0; coop.t = a.clock.t / 1000; a.g.save();
+  const b = loadGame(1, { ...a.store }, { start: a.clock.t + 10 * 60 * 1000 });
+  const c2 = b.g.B.find((x) => x.type === 'coop');
+  assert.equal(c2.stock, 2, '10 minutes, one hen laying every 4 minutes');
+  const c = loadGame(1, { ...a.store }, { start: a.clock.t + 24 * 3600 * 1000 });
+  const c3 = c.g.B.find((x) => x.type === 'coop');
+  assert.equal(c3.stock, c.g.penCap(c3), 'a day later the nest is full, not more');
+});
+
+test('workshops queue jobs, take inputs from the barn and finish by the clock', () => {
+  const { g } = loadGame(1);
+  g.G.lvl = 3; g.G.coins = 1000;
+  const spot = g.freeSpot('mill', 8, 2);
+  const mill = g.build('mill', spot.x, spot.y);
+  assert.ok(mill);
+  assert.equal(g.enqueue(mill, 0), false, 'no wheat yet');
+  g.G.barn.wheat = 6;
+  assert.ok(g.enqueue(mill, 0)); assert.ok(g.enqueue(mill, 0));
+  assert.equal(g.enqueue(mill, 0), false, 'two slots');
+  assert.equal(g.have('wheat'), 2);
+  g.skip(130); g.tickAll();
+  assert.equal(mill.out.length, 1); assert.equal(mill.queue.length, 1);
+  g.skip(130); g.tickAll();
+  assert.equal(mill.out.length, 2);
+  const fr = g.front(mill); g.player.x = fr.x; g.player.y = fr.y; g.step(1);
+  assert.equal(mill.out.length, 0); assert.equal(g.player.stack.filter((s) => s.t === 'flour').length, 2);
+});
+
+test('speeding up costs coins and finishes the timer', () => {
+  const { g } = loadGame(1);
+  const f = g.B.find((b) => b.type === 'field'); f.crop = null; g.G.coins = 100;
+  g.plant(f, 'wheat');
+  const coins = g.G.coins, left = g.timeLeft(f);
+  assert.ok(left > 100);
+  assert.ok(g.speedUp(f));
+  assert.equal(g.fieldState(f), 'ripe');
+  assert.equal(g.G.coins, coins - Math.ceil(left / 30));
+});
+
+test('buildings go only on free cells, keep the space in front of doors free, and can be moved', () => {
+  const { g } = loadGame(1);
+  g.G.lvl = 10; g.G.coins = 100000;
+  const barn = g.B.find((b) => b.type === 'barn');
+  assert.equal(g.canPlace('mill', barn.x, barn.y), false, 'on top of the barn');
+  assert.equal(g.canPlace('field', barn.x + 1, barn.y + 3), false, 'in front of the barn door');
+  assert.equal(g.canPlace('mill', -1, 0), false, 'outside the land');
+  assert.equal(g.canPlace('mill', 0, 14), false, 'door would face the market');
+  const s = g.freeSpot('bakery', 5, -4);
+  const bk = g.build('bakery', s.x, s.y);
+  assert.ok(bk);
+  const t = g.freeSpot('bakery', 25, -5, bk);
+  assert.ok(g.moveBuilding(bk, t.x, t.y));
+  assert.equal(bk.x, t.x);
+  assert.equal(g.canBuy('bakery'), 'limit');
+  g.G.lvl = 1; assert.equal(g.canBuy('mill'), 'lvl');
+});
+
+test('levels come with experience and open new things', () => {
+  const { g } = loadGame(1);
+  assert.equal(g.canBuy('mill'), 'lvl');
+  play(g, 300);
+  assert.ok(g.G.lvl >= 2, `level ${g.G.lvl}`);
+  assert.notEqual(g.canBuy('mill'), 'lvl');
+});
+
+test('the story tasks guide the first steps and pay out', () => {
+  const { g } = loadGame(1);
+  assert.equal(g.curTask().ev, 'harvest');
+  play(g, 240);
+  assert.ok(g.G.task >= 3, `task ${g.G.task}`);
+});
+
+test('a worker harvests, sows the same crop again and carries everything to the barn', () => {
+  const { g } = loadGame(1);
+  g.G.lvl = 6; g.G.coins = 1000;
+  assert.ok(g.hireWorker());
+  g.player.x = 2; g.player.y = 14;
+  g.step(60);
+  assert.ok(g.have('wheat') >= 6, `barn has ${g.have('wheat')} wheat`);
+  assert.ok(g.B.filter((b) => b.type === 'field').every((b) => b.crop === 'wheat'), 'fields sown again');
+});
+
+test('the bot levels up steadily and builds workshops (an hour of play)', () => {
+  const { g } = loadGame(2);
+  const log = play(g, 3600);
+  assert.ok(g.G.lvl >= 6, `level ${g.G.lvl}`);
+  assert.ok(log.some((e) => e.id === 'mill') && log.some((e) => e.id === 'bakery'), log.map((e) => e.id).join(' '));
+  assert.ok(g.G.rep >= 3, `rating ${g.G.rep}`);
+});
+
+test('the farm survives a reload', () => {
+  const a = loadGame(1);
+  play(a.g, 600); a.g.save();
+  const b = loadGame(1, { ...a.store }, { start: a.clock.t });
+  assert.equal(ids(b.g), ids(a.g));
+  assert.equal(b.g.G.coins, a.g.G.coins);
+  assert.equal(b.g.G.lvl, a.g.G.lvl);
+  assert.equal(JSON.stringify(b.g.G.barn), JSON.stringify(a.g.G.barn));
+});
+
+test('nothing is saved before the farm has loaded', () => {
+  const a = loadGame(1);
+  play(a.g, 200); a.g.save();
   const before = a.store[a.g.SAVE_KEY];
   const b = loadGame(1, a.store, { autoload: false });
-  b.g.save(); // the 2 s timer firing while the 3D models still load
+  b.g.save();
   assert.equal(a.store[a.g.SAVE_KEY], before);
-  b.g.load();
-  assert.equal(b.g.G.coins, a.g.G.coins);
 });
 
-test('a product that is cooking survives a reload', () => {
+test('starting over and old saves', () => {
   const a = loadGame(1);
-  a.g.G.built.add('oven'); a.g.G.coins = 100; a.g.buyUpgrade('coop', 'hens');
-  const c = a.g.convs.oven; c.store.egg = 1; c.store.wood = 1; a.g.update(1 / 30);
-  assert.ok(c.cook > 0); a.g.save();
-  const b = loadGame(1, { ...a.store });
-  const d = b.g.convs.oven;
-  for (let i = 0; i < 30 * 4; i++) b.g.update(1 / 30);
-  assert.equal(d.out_n, 1, 'the pie comes out after the reload');
-});
-
-test('the player cannot slip out of the owned land through the corners', () => {
-  const { g } = loadGame(1);
-  const p = g.player;
-  for (const [x, y, dx, dy] of [[.4, .4, -1, -1], [19.6, .4, 1, -1], [.4, 5, -1, 0], [10, .4, 0, -1]]) {
-    p.x = x; p.y = y;
-    for (let i = 0; i < 90; i++) { p.x += dx * .15; p.y += dy * .15; g.update(1 / 30); }
-    assert.ok(p.x > 0 && p.x < 20 && p.y > 0, `escaped to ${p.x.toFixed(2)}, ${p.y.toFixed(2)}`);
-  }
-});
-
-test('starting over clears the farm; saves from the old level mode are dropped', () => {
-  const a = loadGame(1);
-  play(a.g, 300);
-  a.g.resetFarm();
-  assert.deepEqual([...a.g.G.built].sort(), ['coop', 'eggStall', 'shed']);
-  assert.equal(a.g.G.coins, 0);
-  const old = { 'lavka-meta-v1': JSON.stringify({ bank: 50, stars: { 0: 3 } }), 'lavka-run-v1': JSON.stringify({ level: 2, coins: 9 }) };
+  play(a.g, 200); a.g.resetFarm();
+  assert.equal(ids(a.g), 'barn coop field field field field');
+  const old = { 'lavka-farm-v1': '{"v":1}', 'lavka-meta-v1': '{}' };
   const b = loadGame(1, old);
-  assert.equal(b.g.G.coins, 0);
-  assert.equal(old['lavka-meta-v1'], undefined); assert.equal(old['lavka-run-v1'], undefined);
+  assert.equal(old['lavka-farm-v1'], undefined);
+  assert.equal(b.g.G.lvl, 1);
   const c = loadGame(1, { [b.g.SAVE_KEY]: '{broken' });
-  assert.deepEqual([...c.g.G.built].sort(), ['coop', 'eggStall', 'shed'], 'a broken save starts a new farm');
+  assert.equal(ids(c.g), 'barn coop field field field field');
 });
 
-test('the joystick sets direction only: a short drag moves as fast as a long one', () => {
+test('the joystick sets direction only', () => {
   const run = (dy) => {
     const { g, ctx } = loadGame();
-    vm.runInContext(`joy = { id: 1, ox: 100, oy: 300, x: 100, y: ${300 - dy} }`, ctx);
-    const y0 = g.player.y; for (let i = 0; i < 15; i++) g.update(1 / 30);
-    return y0 - g.player.y;
+    g.player.x = 10; g.player.y = 4;
+    vm.runInContext(`joy = { id: 1, ox: 100, oy: 300, x: 100, y: ${300 + dy} }`, ctx);
+    const y0 = g.player.y; g.step(.5);
+    return g.player.y - y0;
   };
   const short = run(20), long = run(120);
-  assert.ok(short > 1, 'a short drag moves');
-  assert.ok(Math.abs(short - long) < 1e-9, `same distance: ${short} vs ${long}`);
-});
-
-test('the touch joystick moves the player', () => {
-  const { g, ctx } = loadGame();
-  const p = g.player, x0 = p.x, y0 = p.y;
-  vm.runInContext('joy = { id: 1, ox: 100, oy: 100, x: 100, y: 40 }', ctx); // drag up
-  for (let i = 0; i < 30; i++) g.update(1 / 30);
-  assert.ok(p.y < y0 - 2, `moved north: y ${y0} -> ${p.y}`);
-  assert.ok(Math.abs(p.x - x0) < .3, 'no sideways drift');
-  vm.runInContext('joy = { id: 1, ox: 100, oy: 100, x: 160, y: 100 }', ctx); // drag right
-  for (let i = 0; i < 15; i++) g.update(1 / 30);
-  assert.ok(p.x > x0 + 1, `moved east: x ${x0} -> ${p.x}`);
+  assert.ok(short > 1);
+  assert.ok(Math.abs(short - long) < 1e-9);
 });
