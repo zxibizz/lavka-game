@@ -74,10 +74,9 @@ addEventListener('resize', resize); resize();
 
 scene.add(new THREE.HemisphereLight('#eef8ff', '#5f9a45', LITE ? 1.55 : 1.0));
 const sun = new THREE.DirectionalLight('#fff0d4', 2.75);
-sun.position.set(4, 22, 24); sun.target.position.set(10, 0, 13);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -19, right: 19, top: 19, bottom: -19, near: 1, far: 70 });
+Object.assign(sun.shadow.camera, { left: -17, right: 17, top: 17, bottom: -17, near: 1, far: 70 });
 sun.shadow.bias = -0.0004; sun.shadow.normalBias = .03; sun.shadow.radius = 4;
 scene.add(sun, sun.target);
 
@@ -100,11 +99,13 @@ function proj(x, y, z = 0) { _v.set(x, z, y).project(camera); return [(_v.x + 1)
 function canvasTex(c) { const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t; }
 function rr(c, x, y, w, h, r) { c.beginPath(); c.roundRect(x, y, w, h, r); }
 const rbox = (parent, w, h, d, c, x, y, z, r = .05) => mesh(new RoundedBoxGeometry(w, h, d, 3, r), c, x, y, z, parent);
+const group = (x = 0, y = 0, parent = scene) => { const g = new THREE.Group(); g.position.set(x, 0, y); parent.add(g); return g; };
 
 // ---------- CC0 models (Quaternius, Kenney via poly.pizza) ----------
 const ASSETS = {
   chars: ['womanA', 'womanB', 'casual', 'hoodie', 'farmer'],
-  props: ['chickenB', 'coop', 'smallBarn', 'tree1', 'tree3', 'fence2', 'crate', 'woodlog', 'stump'],
+  props: ['chickenB', 'coop', 'smallBarn', 'tree1', 'tree3', 'fence2', 'crate', 'woodlog', 'stump',
+    'cow', 'windmill', 'barn', 'openBarn', 'wheat', 'pumpkin', 'well', 'bench', 'lamp', 'fountain'],
 };
 const A = {};
 const mixers = new Set();
@@ -150,7 +151,7 @@ function sack(x, y, h, rot = 0, parent = scene) { const m = mesh(SACK_GEO, '#c99
 function bush(x, y, s, parent = scene) {
   const g = new THREE.Group(); g.position.set(x, 0, y); g.scale.setScalar(s); parent.add(g);
   if (LITE) STATIC_BLOBS.push([x, y + .05, .75 * s, .6 * s]);
-  for (const [dx, dy, dz, r, c] of [[0, .32, 0, .42, '#4cbb3c'], [-.32, .24, .12, .3, '#58c646'], [.33, .26, .08, .32, '#45b236'], [.05, .5, -.1, .3, '#62cf4c']]) mesh(new THREE.SphereGeometry(r, 16, 12), c, dx, dy, dz, g);
+  for (const [dx, dy, dz, r, c] of [[0, .32, 0, .42, '#4cbb3c'], [-.32, .24, .12, .3, '#58c646'], [.33, .26, .08, .32, '#45b236'], [.05, .5, -.1, .3, '#62cf4c']]) mesh(new THREE.SphereGeometry(r, 12, 9), c, dx, dy, dz, g);
   return g;
 }
 // A glTF character arrives as ~10 skinned meshes (one per material) sharing one skeleton. Merge them into one
@@ -160,7 +161,7 @@ function mergeSkinned(root) {
   const parts = []; root.traverse(m => { if (m.isSkinnedMesh) parts.push(m); });
   const sameBones = (p) => p.skeleton.bones.length === parts[0].skeleton.bones.length && p.skeleton.bones.every((b, i) => b === parts[0].skeleton.bones[i]);
   if (parts.length < 2 || !parts.every(sameBones)) { console.warn('character parts not merged'); return; }
-  const geos = [], ranges = [], nm = new THREE.Matrix3();
+  const geos = [], ranges = [];
   let offset = 0;
   for (const p of parts) {
     let g = p.geometry.index ? p.geometry.toNonIndexed() : p.geometry.clone();
@@ -192,20 +193,31 @@ function model(name, height, x = 0, y = 0, rotY = 0, parent = scene, colors) {
   if (colors) recolorTree(o, n => colors[n]);
   parent.add(wrap); return wrap;
 }
+// the same, scaled to fit a w x d footprint (rotation 0)
+function modelFit(name, w, d, x, y, rotY = 0, parent = scene, colors) {
+  const a = A[name], s = Math.min(w / a.size.x, d / a.size.z);
+  return model(name, a.size.y * s, x, y, rotY, parent, colors);
+}
 
 let seed = 11; const srnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 
 // ---------- ground ----------
-const GX0 = -12, GY0 = -10, GW = 44, GH = 50, PPU = 24;
+const GX0 = WORLD.x0 - 14, GY0 = WORLD.y0 - 13, GW = WORLD.x1 - WORLD.x0 + 28, GH = WORLD.y1 - WORLD.y0 + 26, PPU = 20;
 // path layout shared by the ground texture and the grass mask
 function drawPaths(g, X, Y, P, grow, fill) {
   g.fillStyle = fill; g.strokeStyle = fill; g.lineCap = 'round'; g.lineJoin = 'round';
   const area = (x0, y0, x1, y1, r) => { rr(g, X(x0 - grow), Y(y0 - grow), (x1 - x0 + 2 * grow) * P, (y1 - y0 + 2 * grow) * P, Math.max(0, r + grow) * P); g.fill(); };
   const path = (pts, w) => { g.lineWidth = (w + 2 * grow) * P; g.beginPath(); g.moveTo(X(pts[0][0]), Y(pts[0][1])); for (const [x, y] of pts.slice(1)) g.lineTo(X(x), Y(y)); g.stroke(); };
-  area(2.4, 16.9, 17.8, 25.2, 1.2);   // market square
-  area(-14, 25.4, 34, 27.6, 0);       // customers' road
-  path([[10, 17.5], [10, 8.4]], 1.5);
-  path([[3.8, 8.3], [12.8, 8.3]], 1.7);
+  area(WORLD.x0 + .6, 16.9, WORLD.x1 - .6, 25.2, 1.2); // market strip
+  area(GX0 - 2, 25.4, GX0 + GW + 2, 27.6, 0);          // customers' road
+  path([[10, 17.5], [10, 8.4]], 1.5);                  // yard
+  path([[-11, 8.3], [12.8, 8.3]], 1.5);                // yard -> field
+  path([[-5.2, 8.3], [-5.2, 17.5]], 1.4);
+  path([[12.4, 8.3], [12.4, -5.6]], 1.3);              // yard -> garden
+  path([[2.4, -5.6], [17.4, -5.6]], 1.4);
+  path([[10, 10.9], [36, 10.9]], 1.3);                 // yard -> pasture
+  path([[27, 10.9], [27, 17.5]], 1.3);
+  path([[36, 8], [36, 17.5]], 1.3);
 }
 const pathMask = (() => {
   const P = 4, c = document.createElement('canvas'); c.width = GW * P; c.height = GH * P;
@@ -219,16 +231,19 @@ const pathMask = (() => {
   const g = c.getContext('2d');
   const X = x => (x - GX0) * PPU, Y = y => (y - GY0) * PPU;
   g.fillStyle = '#66bd38'; g.fillRect(0, 0, c.width, c.height);
-  for (let i = 0; i < 240; i++) { // soft large-scale colour variation
+  for (let i = 0; i < 900; i++) { // soft large-scale colour variation
     const x = srnd() * c.width, y = srnd() * c.height, r = (1.5 + srnd() * 4) * PPU;
     const col = srnd() < .55 ? '150,225,95' : '70,160,45';
     const gr = g.createRadialGradient(x, y, 0, x, y, r);
     gr.addColorStop(0, `rgba(${col},.32)`); gr.addColorStop(1, `rgba(${col},0)`);
     g.fillStyle = gr; g.fillRect(x - r, y - r, 2 * r, 2 * r);
   }
+  // tilled soil under the crops
+  const soil = (x0, y0, x1, y1) => { rr(g, X(x0), Y(y0), (x1 - x0) * PPU, (y1 - y0) * PPU, .6 * PPU); g.fillStyle = 'rgba(120,80,40,.28)'; g.fill(); };
+  soil(-19.4, 1, -10, 7.7); soil(1.6, -14.8, 8.7, -7.7);
   // soft-edged dirt paths: darker grass rim, warm edge, main dirt, lighter centre
   for (const [grow, col] of [[.75, 'rgba(60,110,35,.10)'], [.5, 'rgba(60,110,35,.12)'], [.22, '#d9834a'], [.1, '#e69456'], [0, '#ee9f60'], [-.35, '#f2a96b']]) drawPaths(g, X, Y, PPU, grow, col);
-  for (let i = 0; i < 1400; i++) { // pebbles on dirt
+  for (let i = 0; i < 4500; i++) { // pebbles on dirt
     const x = GX0 + srnd() * GW, y = GY0 + srnd() * GH;
     if (!pathMask(x, y)) continue;
     g.fillStyle = srnd() < .5 ? 'rgba(200,120,70,.55)' : 'rgba(255,214,170,.6)';
@@ -247,12 +262,12 @@ const clouds = (() => {
       const x = cx + (srnd() - .5) * 120, y = cy + (srnd() - .5) * 60, r = 40 + srnd() * 50;
       for (const [dx, dy] of [[0, 0], [512, 0], [-512, 0], [0, 512], [0, -512]]) {
         const gr = g.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
-        gr.addColorStop(0, 'rgba(0,0,0,.09)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        gr.addColorStop(0, 'rgba(0,0,0,.055)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
         g.fillStyle = gr; g.fillRect(x + dx - r, y + dy - r, 2 * r, 2 * r);
       }
     }
   }
-  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1.6, 1.8);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(GW / 27, GH / 28);
   const m = new THREE.Mesh(new THREE.PlaneGeometry(GW, GH), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, toneMapped: false }));
   m.rotation.x = -Math.PI / 2; m.position.set(GX0 + GW / 2, .012, GY0 + GH / 2);
   scene.add(m); return t;
@@ -283,15 +298,17 @@ const blobs = (() => {
   gr.addColorStop(0, 'rgba(20,40,10,.42)'); gr.addColorStop(.55, 'rgba(20,40,10,.24)'); gr.addColorStop(1, 'rgba(20,40,10,0)');
   g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
   const m = new THREE.InstancedMesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, toneMapped: false }), 400);
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, toneMapped: false }), 700);
   m.frustumCulled = false; m.count = 0; m.position.y = .014; m.renderOrder = 0; m.visible = LITE;
   scene.add(m); return m;
 })();
 const _b = new THREE.Object3D();
 function drawBlobs(list) {
   let n = 0;
+  const vx0 = camX - 14, vx1 = camX + 14, vy0 = camY - 16, vy1 = camY + 12;
   for (const [x, y, rx, ry] of list) {
-    if (n >= 400) break;
+    if (n >= 700) break;
+    if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
     _b.position.set(x, 0, y); _b.scale.set(rx, 1, ry); _b.updateMatrix(); blobs.setMatrixAt(n++, _b.matrix);
   }
   blobs.count = n; blobs.instanceMatrix.needsUpdate = true;
@@ -319,19 +336,24 @@ function zoneDecal(x, y, label) {
     rr(g, .08 * s, .08 * s, 1.44 * s, 1.44 * s, .22 * s);
     g.fillStyle = active ? 'rgba(140,240,240,.6)' : 'rgba(140,240,240,.38)'; g.fill();
     g.setLineDash([.2 * s, .12 * s]); g.lineWidth = .08 * s; g.strokeStyle = active ? '#ffffff' : '#62e0ee'; g.stroke(); g.setLineDash([]);
-    if (showLabel) outlinedText(g, label, .8 * s, .8 * s, (label.length > 6 ? .28 : .34) * s, '#fff', '#1d4f8f', .09 * s);
+    if (showLabel) {
+      g.font = `900 ${.34 * s}px ${FONT}`;
+      const fit = Math.min(.34 * s, .34 * s * 1.3 * s / Math.max(1, g.measureText(label).width));
+      outlinedText(g, label, .8 * s, .8 * s, fit, '#fff', '#1d4f8f', .09 * s);
+    }
     d.tex.needsUpdate = true;
   };
   d.draw(false, true);
   return d;
 }
 
-// white silhouette icons for purchase pads
+// white silhouette icons for purchase pads (unit square centred on 0, drawn at scale s)
 function padIcon(g, kind, x, y, s) {
   g.save(); g.translate(x, y); g.scale(s, s);
   g.fillStyle = '#fff'; g.strokeStyle = '#fff'; g.lineCap = 'round'; g.lineJoin = 'round';
   g.shadowColor = 'rgba(0,0,0,.18)'; g.shadowOffsetY = .03 * 100; g.shadowBlur = 0;
   const circle = (cx, cy, r) => { g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill(); };
+  const poly = (pts) => { g.beginPath(); pts.forEach(([px, py], i) => i ? g.lineTo(px, py) : g.moveTo(px, py)); g.closePath(); g.fill(); };
   if (kind === 'person') {
     circle(.08, -.18, .17);
     g.beginPath(); g.moveTo(-.22, .32); g.quadraticCurveTo(-.2, .02, .08, .02); g.quadraticCurveTo(.36, .02, .38, .32); g.closePath(); g.fill();
@@ -339,24 +361,61 @@ function padIcon(g, kind, x, y, s) {
   } else if (kind === 'chick') {
     g.beginPath(); g.ellipse(0, .08, .26, .2, 0, 0, Math.PI * 2); g.fill();
     circle(.2, -.14, .11);
-    g.beginPath(); g.moveTo(-.2, 0); g.lineTo(-.36, -.16); g.lineTo(-.14, -.08); g.fill();
-    g.beginPath(); g.moveTo(.3, -.16); g.lineTo(.4, -.12); g.lineTo(.3, -.08); g.fill();
+    poly([[-.2, 0], [-.36, -.16], [-.14, -.08]]); poly([[.3, -.16], [.4, -.12], [.3, -.08]]);
     g.fillRect(-.06, .26, .04, .1); g.fillRect(.06, .26, .04, .1);
   } else if (kind === 'tree') {
     g.fillRect(-.05, .05, .1, .3); circle(0, -.08, .24); circle(-.17, .04, .15); circle(.17, .04, .15);
   } else if (kind === 'wood') {
     for (const [dx, dy] of [[-.12, .12], [.12, .12], [0, -.06]]) { rr(g, dx - .2, dy - .08, .4, .16, .08); g.fill(); }
-  } else if (kind === 'bag') {
-    g.lineWidth = .05; g.beginPath(); g.arc(0, -.06, .17, Math.PI, 0); g.stroke();
-    g.beginPath(); g.moveTo(-.3, -.04); g.lineTo(.3, -.04); g.lineTo(.22, .32); g.lineTo(-.22, .32); g.closePath(); g.fill();
-  } else if (kind === 'boots') {
-    for (const dx of [-.16, .14]) { g.beginPath(); g.moveTo(dx - .08, -.28); g.lineTo(dx + .06, -.28); g.lineTo(dx + .06, .12); g.lineTo(dx + .2, .16); g.lineTo(dx + .2, .3); g.lineTo(dx - .08, .3); g.closePath(); g.fill(); }
   } else if (kind === 'pie') {
     g.beginPath(); g.ellipse(0, .08, .32, .14, 0, 0, Math.PI * 2); g.fill();
     g.beginPath(); g.ellipse(0, 0, .3, .12, 0, Math.PI, 0); g.fill();
+  } else if (kind === 'egg') {
+    g.beginPath(); g.ellipse(0, .02, .2, .27, 0, 0, Math.PI * 2); g.fill();
   } else if (kind === 'flag') {
     g.fillRect(-.2, -.34, .05, .66);
-    g.beginPath(); g.moveTo(-.15, -.34); g.lineTo(.3, -.2); g.lineTo(-.15, -.04); g.fill();
+    poly([[-.15, -.34], [.3, -.2], [-.15, -.04]]);
+  } else if (kind === 'wheat') {
+    g.lineWidth = .05; for (const a of [-.25, 0, .25]) { g.beginPath(); g.moveTo(0, .34); g.lineTo(Math.sin(a) * .4, -.06); g.stroke(); }
+    for (const a of [-.25, 0, .25]) for (let k = 0; k < 3; k++) { g.beginPath(); g.ellipse(Math.sin(a) * (.4 + k * .1), -.06 - k * .1, .05, .08, a, 0, Math.PI * 2); g.fill(); }
+  } else if (kind === 'mill') {
+    poly([[-.16, .34], [-.1, -.1], [.1, -.1], [.16, .34]]);
+    g.lineWidth = .08; g.beginPath(); g.moveTo(-.32, -.36); g.lineTo(.32, .16); g.moveTo(.32, -.36); g.lineTo(-.32, .16); g.stroke();
+  } else if (kind === 'flour') {
+    g.beginPath(); g.moveTo(-.12, -.24); g.quadraticCurveTo(-.3, 0, -.24, .3); g.lineTo(.24, .3); g.quadraticCurveTo(.3, 0, .12, -.24); g.closePath(); g.fill();
+    g.fillRect(-.14, -.32, .28, .08);
+  } else if (kind === 'cow') {
+    rr(g, -.3, -.1, .5, .28, .1); g.fill(); rr(g, .14, -.24, .22, .2, .07); g.fill();
+    for (const lx of [-.26, -.1, .04]) g.fillRect(lx, .14, .07, .2);
+    poly([[.16, -.24], [.12, -.34], [.2, -.26]]); poly([[.32, -.24], [.36, -.34], [.28, -.26]]);
+  } else if (kind === 'milk') {
+    poly([[-.13, .34], [-.13, -.06], [-.07, -.18], [-.07, -.28], [.07, -.28], [.07, -.18], [.13, -.06], [.13, .34]]);
+  } else if (kind === 'cheese') {
+    poly([[-.32, .24], [.32, .24], [.32, -.04], [-.32, -.22]]);
+    g.save(); g.globalCompositeOperation = 'destination-out'; circle(-.1, .06, .06); circle(.14, .1, .05); g.restore();
+  } else if (kind === 'pumpkin') {
+    for (const dx of [-.16, 0, .16]) { g.beginPath(); g.ellipse(dx, .08, .16, .22, 0, 0, Math.PI * 2); g.fill(); }
+    g.fillRect(-.03, -.24, .06, .12);
+  } else if (kind === 'cake') {
+    rr(g, -.3, .04, .6, .26, .05); g.fill(); rr(g, -.2, -.18, .4, .24, .05); g.fill(); circle(0, -.26, .07);
+  } else if (kind === 'bench') {
+    g.fillRect(-.34, -.04, .68, .1); g.fillRect(-.34, -.26, .68, .08);
+    g.fillRect(-.28, .06, .07, .22); g.fillRect(.21, .06, .07, .22);
+  } else if (kind === 'flower') {
+    for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2; circle(Math.cos(a) * .16, -.06 + Math.sin(a) * .16, .1); }
+    g.fillRect(-.03, .1, .06, .26);
+  } else if (kind === 'lamp') {
+    g.fillRect(-.03, -.12, .06, .46); g.fillRect(-.14, .3, .28, .06);
+    poly([[-.13, -.12], [.13, -.12], [.09, -.34], [-.09, -.34]]);
+  } else if (kind === 'well') {
+    poly([[-.32, -.12], [0, -.36], [.32, -.12]]); g.fillRect(-.24, -.12, .05, .24); g.fillRect(.19, -.12, .05, .24);
+    rr(g, -.28, .1, .56, .24, .06); g.fill();
+  } else if (kind === 'fountain') {
+    g.beginPath(); g.ellipse(0, .2, .36, .12, 0, 0, Math.PI * 2); g.fill(); g.fillRect(-.05, -.1, .1, .3);
+    g.lineWidth = .05; g.beginPath(); g.moveTo(0, -.12); g.quadraticCurveTo(-.24, -.4, -.3, .06); g.moveTo(0, -.12); g.quadraticCurveTo(.24, -.4, .3, .06); g.stroke();
+  } else if (kind === 'land') {
+    for (const dx of [-.24, 0, .24]) poly([[dx - .07, .32], [dx - .07, -.18], [dx, -.28], [dx + .07, -.18], [dx + .07, .32]]);
+    g.fillRect(-.36, -.06, .72, .07); g.fillRect(-.36, .14, .72, .07);
   }
   g.restore();
 }
@@ -378,14 +437,16 @@ function drawPadDecal(p) {
     d.key = key;
     const { g, s } = d; g.clearRect(0, 0, d.c.width, d.c.height);
     const x0 = .12 * s, y0 = .56 * s, w = 1.56 * s, prog = padPaid(p) / p.cost;
-    rr(g, x0, y0, w, w, .26 * s); g.fillStyle = 'rgba(190,240,150,.55)'; g.fill();
-    if (prog > 0) { g.save(); rr(g, x0, y0, w, w, .26 * s); g.clip(); g.fillStyle = 'rgba(110,215,70,.8)'; g.fillRect(x0, y0 + w * (1 - prog), w, w * prog); g.restore(); }
+    const land = p.kind === 'land';
+    rr(g, x0, y0, w, w, .26 * s); g.fillStyle = land ? 'rgba(255,214,90,.6)' : 'rgba(190,240,150,.55)'; g.fill();
+    if (prog > 0) { g.save(); rr(g, x0, y0, w, w, .26 * s); g.clip(); g.fillStyle = land ? 'rgba(245,170,40,.85)' : 'rgba(110,215,70,.8)'; g.fillRect(x0, y0 + w * (1 - prog), w, w * prog); g.restore(); }
     g.lineWidth = (on ? .12 : .09) * s; g.strokeStyle = '#fff'; rr(g, x0, y0, w, w, .26 * s); g.stroke();
     padIcon(g, p.icon, x0 + w / 2, y0 + .58 * s, .95 * s);
+    const txt = left >= 10000 ? (left / 1000).toFixed(1).replace('.', ',') + 'к' : String(left);
     g.font = `900 ${.4 * s}px ${FONT}`;
-    const tw = g.measureText(left).width;
+    const tw = g.measureText(txt).width;
     cashIcon(g, x0 + w / 2 - tw / 2 - .12 * s, y0 + 1.22 * s, s);
-    outlinedText(g, String(left), x0 + w / 2 + .18 * s, y0 + 1.22 * s, .4 * s, '#fff', '#2f6b28', .1 * s);
+    outlinedText(g, txt, x0 + w / 2 + .18 * s, y0 + 1.22 * s, .4 * s, '#fff', '#2f6b28', .1 * s);
     g.font = `900 ${.27 * s}px ${FONT}`;
     const fit = Math.min(.27 * s, .27 * s * 1.7 * s / Math.max(1, g.measureText(p.label).width));
     outlinedText(g, p.label, .9 * s, .27 * s, fit, '#fff', '#2f6b28', .08 * s);
@@ -397,7 +458,18 @@ function drawPadDecal(p) {
 
 // ---------- items (instanced) ----------
 const MAXI = 900;
-function itemMesh(geo, m) {
+// several primitives with their own colours merged into one geometry (one draw call per item type)
+function coloredGeo(parts) {
+  const geos = parts.map(([g, c]) => {
+    g = g.index ? g.toNonIndexed() : g;
+    for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k);
+    const col = new THREE.Color(c), n = g.attributes.position.count, a = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { a[i * 3] = col.r; a[i * 3 + 1] = col.g; a[i * 3 + 2] = col.b; }
+    g.setAttribute('color', new THREE.BufferAttribute(a, 3)); return g;
+  });
+  return mergeGeometries(geos);
+}
+function itemMesh(geo, m = BAKED_MAT) {
   const im = new THREE.InstancedMesh(geo, m, MAXI);
   im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false; im.count = 0;
   scene.add(im); return im;
@@ -411,14 +483,24 @@ const noteTex = (() => {
   return canvasTex(c);
 })();
 const ITEMS = {
-  egg: itemMesh(new THREE.SphereGeometry(.13, 18, 14).scale(1.08, 1.0, 1.0).translate(0, .13, 0), mat('#fffaf0')),
-  wood: itemMesh(new THREE.CylinderGeometry(.11, .11, .66, 14).rotateZ(Math.PI / 2).translate(0, .11, 0), [mat('#a8672f'), mat('#efc58c'), mat('#efc58c')]),
-  pie: itemMesh(new THREE.CylinderGeometry(.24, .27, .13, 22).translate(0, .065, 0), [mat('#c27b33'), mat('#f2bb5c'), mat('#c27b33')]),
+  egg: itemMesh(coloredGeo([[new THREE.SphereGeometry(.13, 18, 14).scale(1.08, 1.0, 1.0).translate(0, .13, 0), '#fffaf0']])),
+  wood: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.11, .11, .66, 14, 1, true).rotateZ(Math.PI / 2).translate(0, .11, 0), '#a8672f'],
+    [new THREE.CircleGeometry(.11, 14).rotateY(Math.PI / 2).translate(.33, .11, 0), '#efc58c'], [new THREE.CircleGeometry(.11, 14).rotateY(-Math.PI / 2).translate(-.33, .11, 0), '#efc58c']])),
+  pie: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.24, .27, .1, 22).translate(0, .05, 0), '#c27b33'], [new THREE.CylinderGeometry(.22, .24, .05, 22).translate(0, .11, 0), '#f2bb5c']])),
+  wheat: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.1, .08, .5, 10).rotateZ(Math.PI / 2).translate(-.06, .1, 0), '#d9b23a'],
+    [new THREE.SphereGeometry(.12, 10, 8).scale(1.4, .9, 1).translate(.22, .1, 0), '#f0cf5a'], [new THREE.TorusGeometry(.1, .025, 6, 12).rotateY(Math.PI / 2).translate(.02, .1, 0), '#a86d2a']])),
+  flour: itemMesh(coloredGeo([[SACK_GEO.clone().scale(.38, .34, .38), '#f4ecdc'], [new THREE.TorusGeometry(.045, .012, 6, 12).rotateX(Math.PI / 2).translate(0, .26, 0), '#c27b33']])),
+  pumpkin: itemMesh(coloredGeo([[new THREE.SphereGeometry(.2, 16, 12).scale(1, .78, 1).translate(0, .16, 0), '#f08a2a'], [new THREE.CylinderGeometry(.03, .04, .1, 8).translate(0, .34, 0), '#6b8a2a']])),
+  milk: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.1, .1, .22, 14).translate(0, .11, 0), '#fbfbf6'], [new THREE.CylinderGeometry(.05, .1, .07, 14).translate(0, .255, 0), '#fbfbf6'],
+    [new THREE.CylinderGeometry(.055, .055, .05, 12).translate(0, .31, 0), '#3c8fd9'], [new THREE.CylinderGeometry(.102, .102, .06, 14).translate(0, .12, 0), '#7cc0f5']])),
+  cheese: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.22, .22, .15, 20).translate(0, .075, 0), '#f5c842'], [new THREE.CylinderGeometry(.205, .205, .152, 20, 1, true).translate(0, .075, 0), '#f5c842']])),
+  cake: itemMesh(coloredGeo([[new THREE.CylinderGeometry(.24, .24, .13, 22).translate(0, .065, 0), '#fff2e6'], [new THREE.CylinderGeometry(.245, .245, .03, 22).translate(0, .12, 0), '#ff9cc4'],
+    [new THREE.CylinderGeometry(.16, .16, .1, 20).translate(0, .18, 0), '#ffd6e6'], [new THREE.SphereGeometry(.045, 10, 8).translate(0, .26, 0), '#e0303a']])),
   coin: itemMesh(new THREE.BoxGeometry(.46, .045, .25).translate(0, .023, 0),
     [mat('#2f8c2c'), mat('#2f8c2c'), new THREE.MeshLambertMaterial({ map: noteTex }), mat('#2f8c2c'), mat('#2f8c2c'), mat('#2f8c2c')]),
 };
 const _o = new THREE.Object3D();
-const lists = { egg: [], wood: [], pie: [], coin: [] };
+const lists = Object.fromEntries(Object.keys(ITEMS).map(k => [k, []]));
 function putItem(t, x, y, z, rot = 0) { lists[t].push(x, y, z, rot); }
 function flushItems() {
   for (const t in ITEMS) {
@@ -433,7 +515,7 @@ function flushItems() {
 // particles: confetti boxes and smoke puffs
 const confetti = new THREE.InstancedMesh(new THREE.BoxGeometry(.1, .1, .1), new THREE.MeshLambertMaterial(), 300);
 confetti.frustumCulled = false; scene.add(confetti);
-const smoke = new THREE.InstancedMesh(new THREE.SphereGeometry(.16, 10, 8), new THREE.MeshLambertMaterial({ color: '#f2f2f2', transparent: true, opacity: .75 }), 120);
+const smoke = new THREE.InstancedMesh(new THREE.SphereGeometry(.16, 10, 8), new THREE.MeshLambertMaterial({ color: '#f2f2f2', transparent: true, opacity: .75 }), 160);
 smoke.frustumCulled = false; scene.add(smoke);
 const _c = new THREE.Color();
 
@@ -519,10 +601,10 @@ function posePerson(c, a, run = true) {
   c.g.position.set(a.x, 0, a.y);
   c.g.rotation.y = Math.PI / 2 - a.dir;
   const sp = Math.hypot(a.vx || 0, a.vy || 0);
-  if (a.chopping) setAnim(c, 'Sword_Slash', 1.5);
+  if (a.chopping) setAnim(c, 'Sword_Slash', a.tool === 'axe' ? 1.5 : 2);
   else if (sp > .35) { const clip = run ? 'Run' : 'Walk'; setAnim(c, clip, Math.max(.4, sp / c.stride[clip])); }
   else setAnim(c, 'Idle');
-  c.axe.visible = !!a.chopping;
+  c.axe.visible = !!a.chopping && a.tool === 'axe';
   if (c.axe.visible && !c.axeFixed) { // undo bone/world scaling so the axe keeps its size
     c.g.updateMatrixWorld(true); const ws = new THREE.Vector3(); c.wrist.getWorldScale(ws); c.axe.scale.setScalar(1 / ws.x); c.axeFixed = true;
   }
@@ -534,67 +616,142 @@ function personFor(a, opts) {
   p.seen = true; return p;
 }
 
-function makeChicken() {
-  const a = A.chickenB, o = SkeletonUtils.clone(a.scene), s = .82 / a.size.y;
+// animals: chickens and cows
+const ANIMAL = {
+  chicken: { model: 'chickenB', h: .82, bright: 1.7, idle: 'Idle', eat: 'Idle_Peck', move: 'Run', moveTs: .55 },
+  cow: { model: 'cow', h: 1.5, bright: 0, idle: 'Idle', eat: 'Eating', move: 'Walk', moveTs: .7 },
+};
+function makeAnimal(kind) {
+  const k = ANIMAL[kind], a = A[k.model], o = SkeletonUtils.clone(a.scene), s = k.h / a.size.y;
   o.scale.setScalar(s);
   const g = new THREE.Group(); g.add(o); scene.add(g);
-  o.traverse(m => { if (m.isMesh) { m.frustumCulled = false; m.material = m.material.clone(); m.material.color.setScalar(1.7); } });
+  o.traverse(m => { if (m.isMesh) { m.frustumCulled = false; if (k.bright) { m.material = m.material.clone(); m.material.color.setScalar(k.bright); } } });
   const mixer = new THREE.AnimationMixer(o); mixers.add(mixer);
   const actions = {};
-  for (const n of ['Idle', 'Idle_Peck', 'Run']) { const c = a.anims.find(c => c.name.endsWith('|' + n)); if (c) actions[n] = mixer.clipAction(c); }
-  actions.Idle.play(); mixer.update(Math.random() * 2);
-  return { g, mixer, actions, cur: 'Idle' };
+  for (const n of [k.idle, k.eat, k.move]) { const c = a.anims.find(c => c.name === n || c.name.endsWith('|' + n)); if (c) actions[n] = mixer.clipAction(c); }
+  actions[k.idle].play(); mixer.update(Math.random() * 2);
+  return { g, mixer, actions, cur: k.idle, k };
 }
-const chickenMeshes = [];
+const animalMeshes = new Map(); // animal state -> mesh
 
-// ---------- static buildings ----------
-// coop: picket fence + hen house model
-{
-  const coopG = new THREE.Group(); scene.add(coopG);
-  const f = A.fence2, segLen = f.size.x * (.62 / f.size.y);
-  const run = (x0, y0, x1, y1) => {
-    const len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.round(len / segLen)), ang = Math.atan2(y1 - y0, x1 - x0);
-    for (let i = 0; i < n; i++) {
-      const t = (i + .5) / n;
-      const w = model('fence2', .62, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, -ang, coopG);
-      w.scale.x = len / n / segLen;
-    }
-  };
-  run(2, 2.8, 7, 2.8); run(2, 2.8, 2, 7); run(7, 2.8, 7, 7); run(2, 7, 3.7, 7); run(5.3, 7, 7, 7);
-  model('coop', 1.9, 3.3, 3.75, 0, coopG);
-  bakeMerge(coopG);
+// ---------- static & purchasable buildings ----------
+// Every purchasable thing gets a group that is hidden until it is built and pops in when it appears.
+const shown = new Map(); // id -> [objects]
+function owns(id, ...objs) { if (!shown.has(id)) shown.set(id, []); shown.get(id).push(...objs); }
+function fenceRun(x0, y0, x1, y1, parent, h = .62) {
+  const f = A.fence2, segLen = f.size.x * (h / f.size.y);
+  const len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.round(len / segLen)), ang = Math.atan2(y1 - y0, x1 - x0);
+  for (let i = 0; i < n; i++) {
+    const t = (i + .5) / n;
+    const w = model('fence2', h, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, -ang, parent);
+    w.scale.x = len / n / segLen;
+  }
 }
-// nest
-mesh(new THREE.CylinderGeometry(.7, .78, .1, 24), '#e3c06c', NEST.x, .05, NEST.y);
-mesh(new THREE.TorusGeometry(.66, .1, 8, 24).rotateX(Math.PI / 2), '#d1a854', NEST.x, .1, NEST.y);
-// trees
+// pens: fence with a gate in the south side, a house in the corner and a pile spot in front of the gate
+for (const p of penList) {
+  const g = group();
+  const [x0, y0, x1, y1] = p.fence, [ga, gb] = p.gate;
+  fenceRun(x0, y0, x1, y0, g); fenceRun(x0, y0, x0, y1, g); fenceRun(x1, y0, x1, y1, g); fenceRun(x0, y1, ga, y1, g); fenceRun(gb, y1, x1, y1, g);
+  if (p.id === 'coop') model('coop', 1.9, p.house.x, p.house.y, 0, g);
+  else model('openBarn', 2.4, p.house.x, p.house.y, 0, g);
+  bakeMerge(g);
+  NO_GRASS.push([x0 - .2, y0 - .2, x1 + .2, y1 + .3]);
+  if (LITE) STATIC_BLOBS.push([p.house.x, p.house.y + .1, 1.3, 1]);
+  // pile spot: nest of straw for eggs, a trough for milk
+  const pg = group(p.pile.x, p.pile.y);
+  if (p.item === 'egg') { mesh(new THREE.CylinderGeometry(.7, .78, .1, 24), '#e3c06c', 0, .05, 0, pg); mesh(new THREE.TorusGeometry(.66, .1, 8, 24).rotateX(Math.PI / 2), '#d1a854', 0, .1, 0, pg); }
+  else { rbox(pg, 1.5, .1, 1.0, '#9b6a3a', 0, .05, 0, .03); for (const [w, d, x, z] of [[1.5, .08, 0, -.48], [1.5, .08, 0, .48], [.08, 1, -.72, 0], [.08, 1, .72, 0]]) rbox(pg, w, .16, d, '#b9824a', x, .08, z, .02); }
+  bakeMerge(pg);
+  NO_GRASS.push([p.pile.x - 1, p.pile.y - 1, p.pile.x + 1, p.pile.y + 1]);
+  if (p.id !== 'coop') owns(p.id, g, pg);
+}
+// plants: trees (crown, stump and sapling), wheat and pumpkin patches
 const TREE_GREENS = ['#46b83a', '#55c642', '#3fae35', '#5ccf47'];
-const treeMeshes = trees.map((t, i) => {
-  const g = new THREE.Group(); g.position.set(t.x, 0, t.y); scene.add(g);
-  const crown = new THREE.Group(); g.add(crown);
-  const green = TREE_GREENS[i % TREE_GREENS.length];
-  model('tree3', 2.3 + (i % 3) * .25, 0, 0, i * 1.3, crown, { Green: green, Brown: '#8b5a2b' });
-  const stump = new THREE.Group(); g.add(stump);
-  model('stump', .42, 0, 0, i, stump, { Green: '#7fce4a' });
-  const sapling = model('tree1', .9, 0, 0, i, stump, { Green: green });
-  bakeMerge(crown); bakeMerge(stump, m => m === sapling); bakeMerge(sapling);
-  return { g, crown, stump, sapling };
+const plantMeshes = new Map();
+plants.forEach((t, i) => {
+  if (t.group === 'grove') {
+    const g = group(t.x, t.y);
+    const crown = new THREE.Group(); g.add(crown);
+    const green = TREE_GREENS[i % TREE_GREENS.length];
+    model('tree3', 2.3 + (i % 3) * .25, 0, 0, i * 1.3, crown, { Green: green, Brown: '#8b5a2b' });
+    const stump = new THREE.Group(); g.add(stump);
+    model('stump', .42, 0, 0, i, stump, { Green: '#7fce4a' });
+    const sapling = model('tree1', .9, 0, 0, i, stump, { Green: green });
+    bakeMerge(crown); bakeMerge(stump, m => m === sapling); bakeMerge(sapling);
+    plantMeshes.set(t, { g, crown, stump, sapling });
+  } else {
+    NO_GRASS.push([t.x - .8, t.y - .7, t.x + .8, t.y + .7]);
+  }
 });
-// oven (bakery)
-const ovenG = new THREE.Group(); ovenG.position.set(10, 0, 5.6); scene.add(ovenG);
-box(ovenG, 2.0, 1.0, 1.6, '#cf7a52', 0, .5, 0);
-box(ovenG, 2.06, .1, 1.66, '#b8643f', 0, 1.0, 0);
-mesh(new THREE.SphereGeometry(.78, 22, 14, 0, Math.PI * 2, 0, Math.PI / 2), '#d98a62', 0, 1.0, 0, ovenG).scale.set(1, .8, .9);
-box(ovenG, .3, .9, .3, '#8c4a33', .55, 1.4, -.3);
-const ovenMouth = mesh(new THREE.CircleGeometry(.36, 20, 0, Math.PI), new THREE.MeshLambertMaterial({ color: '#3a2620', emissive: '#000000' }), 0, .12, .81, ovenG);
-box(ovenG, .72, .12, .02, '#3a2620', 0, .06, .81);
-bakeMerge(ovenG, m => m === ovenMouth);
-// oven trays
-const ovenTrays = [OVEN_IN, OVEN_OUT].map(z => box(scene, 1.15, .08, .7, '#b98a52', z.x, .04, z.y));
+// crops are instanced: a soil bed per patch, wheat stalks or a pumpkin on top
+function dynInstanced(name, n, height, colors) {
+  const a = A[name]; a.scene.updateMatrixWorld(true);
+  const s = height / a.size.y, base = new THREE.Matrix4().makeTranslation(-a.center.x * s, -a.min.y * s, -a.center.z * s).multiply(new THREE.Matrix4().makeScale(s, s, s));
+  const geos = [];
+  a.scene.traverse(m => {
+    if (!m.isMesh) return;
+    let g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+    for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k);
+    const mats = (Array.isArray(m.material) ? m.material : [m.material]).map(mm => { const c = mm.clone(); if (colors && colors[mm.name]) c.color.set(colors[mm.name]); return c; });
+    colorAttr(g, mats); g.applyMatrix4(new THREE.Matrix4().multiplyMatrices(base, m.matrixWorld)); geos.push(g);
+  });
+  const im = new THREE.InstancedMesh(mergeGeometries(geos), BAKED_MAT, n);
+  im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false; im.count = 0; scene.add(im);
+  return im;
+}
+const wheatIM = dynInstanced('wheat', 30 * 7, .95, { Yellow: '#e8c050' });
+const pumpkinIM = dynInstanced('pumpkin', 16, .55, { Orange: '#f08a2a', Brown: '#6b8a2a' });
+const sproutIM = itemMesh(coloredGeo([[new THREE.ConeGeometry(.05, .3, 5).translate(0, .15, 0), '#6cc43d']]), BAKED_MAT);
+const bedIM = itemMesh(coloredGeo([[new RoundedBoxGeometry(1.25, .12, .95, 2, .05).translate(0, .03, 0), '#9a6436']]), BAKED_MAT);
+const leafIM = itemMesh(coloredGeo([[new THREE.SphereGeometry(.2, 8, 6).scale(1.3, .35, 1).translate(.22, .06, .1), '#4fae3a'], [new THREE.SphereGeometry(.18, 8, 6).scale(1.3, .35, 1).translate(-.2, .05, -.12), '#5cbb44']]), BAKED_MAT);
+const STALKS = [[-.38, -.22], [0, -.26], [.38, -.22], [-.2, .12], [.2, .12], [-.42, .26], [.4, .28]];
+
+// converters
+function zoneLabel(c, which) {
+  if (which === 'out') return ITEM[c.out].name.toUpperCase();
+  return { oven: 'В ПЕЧЬ', mill: 'НА ПОМОЛ', dairy: 'МОЛОКО', sweets: 'В ТЕСТО' }[c.id];
+}
+const convMeshes = new Map();
+for (const c of convList) {
+  const g = group(c.x, c.y);
+  let mouth = null;
+  if (c.id === 'oven') {
+    box(g, 2.0, 1.0, 1.6, '#cf7a52', 0, .5, 0);
+    box(g, 2.06, .1, 1.66, '#b8643f', 0, 1.0, 0);
+    mesh(new THREE.SphereGeometry(.78, 22, 14, 0, Math.PI * 2, 0, Math.PI / 2), '#d98a62', 0, 1.0, 0, g).scale.set(1, .8, .9);
+    box(g, .3, .9, .3, '#8c4a33', .55, 1.4, -.3);
+    mouth = mesh(new THREE.CircleGeometry(.36, 20, 0, Math.PI), new THREE.MeshLambertMaterial({ color: '#3a2620', emissive: '#000000' }), 0, .12, .81, g);
+    box(g, .72, .12, .02, '#3a2620', 0, .06, .81);
+    const d = group(-c.x, -c.y, g); model('crate', .5, 8.0, 5.0, .4, d); model('crate', .42, 7.8, 5.6, 1.1, d); sack(12.0, 5.2, .7, -.3, d);
+  } else if (c.id === 'mill') {
+    model('windmill', 3.8, 0, -.2, 0, g, { Main: '#d9573a', Walls: '#f3ead2' });
+    sack(-1.6, .3, .7, .4, g); sack(1.5, .5, .6, 1.2, g);
+  } else if (c.id === 'dairy') {
+    modelFit('barn', 2.8, 2.4, 0, 0, 0, g, { DarkRed: '#3c7fc0', LightRed: '#5a9ad6' });
+    // a big cheese wheel by the door
+    mesh(new THREE.CylinderGeometry(.34, .34, .26, 20), '#f5c842', 1.55, .13, .7, g);
+  } else if (c.id === 'sweets') {
+    rbox(g, 2.4, 1.4, 1.8, '#fff1dc', 0, .7, 0, .08);
+    const roof = mesh(new THREE.CylinderGeometry(.01, 1.75, .9, 4, 1).rotateY(Math.PI / 4).scale(1.05, 1, .8), '#ff8fb8', 0, 1.85, 0, g);
+    roof.castShadow = true;
+    rbox(g, .6, .9, .06, '#a86a3a', -.5, .45, .9, .03);                 // door
+    rbox(g, .6, .5, .05, '#9fd8f5', .55, .85, .9, .03);                  // window
+    for (let i = 0; i < 6; i++) rbox(g, .4, .12, .5, i % 2 ? '#ffffff' : '#ff6fa0', -1 + i * .4, 1.35, 1.05, .02); // awning
+    mesh(new THREE.CylinderGeometry(.3, .3, .2, 18), '#fff2e6', 0, 2.4, 0, g); mesh(new THREE.CylinderGeometry(.2, .2, .16, 18), '#ff9cc4', 0, 2.58, 0, g);
+    mesh(new THREE.SphereGeometry(.07, 10, 8), '#e0303a', 0, 2.72, 0, g);
+  }
+  bakeMerge(g, m => m === mouth);
+  const trays = [c.IN, c.OUT].map(z => box(scene, 1.15, .08, .7, '#b98a52', z.x, .04, z.y));
+  const zones = [zoneDecal(c.IN.x, c.IN.y + .05, zoneLabel(c, 'in')), zoneDecal(c.OUT.x, c.OUT.y + .05, zoneLabel(c, 'out'))];
+  zones.forEach(z => z.draw(false, true));
+  convMeshes.set(c, { g, mouth, trays, zones });
+  owns(c.id, g, ...trays, ...zones.map(z => z.m));
+  NO_GRASS.push([c.x - c.w / 2 - .6, c.y - c.d / 2 - .6, c.x + c.w / 2 + .6, c.OUT.y + .7]);
+}
 // stalls
 const stallMeshes = new Map();
 function makeStall(st) {
-  const g = new THREE.Group(); g.position.set(st.x, 0, st.y); scene.add(g);
+  const g = group(st.x, st.y);
   const red = '#e0393f', dark = '#b8272f';
   rbox(g, 2.4, .14, 1.0, red, 0, .78, 0, .06);
   rbox(g, 2.28, .56, .9, dark, 0, .44, 0, .05);
@@ -609,34 +766,75 @@ function makeStall(st) {
   return g;
 }
 const sellZones = new Map(), stallCashiers = new Map();
-const ovenZones = { in: zoneDecal(OVEN_IN.x, OVEN_IN.y + .05, 'В ПЕЧЬ'), out: zoneDecal(OVEN_OUT.x, OVEN_OUT.y + .05, 'ПИРОГИ') };
+for (const st of stallList) NO_GRASS.push([st.x - 1.4, st.y - 2.6, st.x + 2.4, st.y + .7]);
+// the shed (bag and boots upgrades)
+{ const g = group(); model('smallBarn', 2.1, SHED.x, SHED.y, 0, g); bakeMerge(g); NO_GRASS.push([SHED.x - 1.4, SHED.y - 1.1, SHED.x + 1.4, SHED.y + 1.4]); if (LITE) STATIC_BLOBS.push([SHED.x, SHED.y + .1, 1.4, 1]); }
+// decorations bought on pads
+const DECOR_BUILD = {
+  bench: (g) => model('bench', .55, 0, 0, 0, g),
+  lamp: (g) => model('lamp', 2.5, 0, 0, 0, g, { Light: '#fff3b0' }),
+  well: (g) => model('well', 1.9, 0, 0, 0, g),
+  fountain: (g) => modelFit('fountain', 2, 2, 0, 0, 0, g),
+  flowers: (g) => {
+    for (let k = 0; k < 10; k++) { const a = k / 10 * Math.PI * 2; mesh(new THREE.DodecahedronGeometry(.12, 0), '#b9b2a4', Math.cos(a) * .62, .06, Math.sin(a) * .48, g); }
+    mesh(new THREE.CylinderGeometry(.58, .6, .1, 20).scale(1, 1, .78), '#8a5a35', 0, .05, 0, g);
+    const cols = ['#ff6f9a', '#ffd84d', '#ffffff', '#b98cff', '#ff8a3d'];
+    for (let k = 0; k < 14; k++) { const a = k * 2.4, r = .1 + (k % 4) * .12; mesh(new THREE.SphereGeometry(.08, 8, 6), cols[k % cols.length], Math.cos(a) * r, .26 + (k % 3) * .04, Math.sin(a) * r * .8, g); }
+    for (let k = 0; k < 6; k++) { const a = k * 1.05; mesh(new THREE.SphereGeometry(.13, 8, 6).scale(1, .6, 1), '#4cbb3c', Math.cos(a) * .3, .16, Math.sin(a) * .24, g); }
+  },
+};
+for (const d of DEFS) if (d.kind === 'decor' && d.model) {
+  const g = group(d.x, d.y); DECOR_BUILD[d.model](g); g.rotation.y = d.rot || 0; bakeMerge(g); owns(d.id, g);
+  NO_GRASS.push([d.x - 1, d.y - 1, d.x + 1, d.y + 1]);
+}
 let bunting = null;
 function makeBunting() {
   const g = new THREE.Group(); scene.add(g);
-  for (const x of [2.8, 17.4]) box(g, .12, 2.6, .12, '#8a5a2b', x, 1.3, 16.6);
   const cols = ['#e0453a', '#ffd23f', '#4f8fe0', '#5cc04a', '#ff8fb1'];
-  for (let i = 1; i < 26; i++) {
-    const t = i / 26, x = 2.8 + 14.6 * t, y = 2.5 - Math.sin(t * Math.PI) * .5;
-    const f = mesh(new THREE.ConeGeometry(.16, .34, 3).rotateX(Math.PI), cols[i % cols.length], x, y, 16.6, g); f.castShadow = false;
+  for (const [xa, xb] of [[-19.4, -.8], [1.2, 18.8], [21, 39.4]]) {
+    for (const x of [xa, xb]) box(g, .12, 2.6, .12, '#8a5a2b', x, 1.3, 16.6);
+    for (let i = 1; i < 26; i++) {
+      const t = i / 26, x = xa + (xb - xa) * t, y = 2.5 - Math.sin(t * Math.PI) * .5;
+      const f = mesh(new THREE.ConeGeometry(.16, .34, 3).rotateX(Math.PI), cols[i % cols.length], x, y, 16.6, g); f.castShadow = false;
+    }
   }
   return g;
 }
-
-// ---------- decoration ----------
+// locked plots: a fence on the border with the farm and a sign
+function signBoard(text, x, y, parent) {
+  const g = group(x, y, parent);
+  box(g, .1, 1.3, .1, '#8a5a2b', -.55, .65, 0); box(g, .1, 1.3, .1, '#8a5a2b', .55, .65, 0);
+  const c = document.createElement('canvas'); c.width = 256; c.height = 96; const k = c.getContext('2d');
+  k.fillStyle = '#e9c48a'; k.fillRect(0, 0, 256, 96); k.strokeStyle = '#a8763c'; k.lineWidth = 8; k.strokeRect(4, 4, 248, 88);
+  k.font = `900 40px ${FONT}`; k.textAlign = 'center'; k.textBaseline = 'middle'; k.fillStyle = '#6b3f17'; k.fillText(text, 128, 50);
+  const b = new THREE.Mesh(new THREE.BoxGeometry(1.4, .55, .06), [mat('#c99a5c'), mat('#c99a5c'), mat('#c99a5c'), mat('#c99a5c'), new THREE.MeshLambertMaterial({ map: canvasTex(c) }), mat('#c99a5c')]);
+  b.position.set(0, 1.1, .02); b.castShadow = true; g.add(b);
+  return g;
+}
+const locks = new Map();
+for (const [zid, z] of Object.entries(ZONES)) {
+  if (!z.land) continue;
+  const g = new THREE.Group(); scene.add(g);
+  const [x0, y0, x1, y1] = z.rect;
+  if (zid === 'field') fenceRun(x1 + .2, y0 + .3, x1 + .2, y1 - .2, g, .75);
+  if (zid === 'pasture') fenceRun(x0 - .2, y0 + .3, x0 - .2, y1 - .2, g, .75);
+  if (zid === 'garden') fenceRun(x0 + .3, y1 + .2, x1 - .3, y1 + .2, g, .75);
+  bakeMerge(g);
+  const d = DEF[z.land];
+  const sx = zid === 'field' ? x1 - 1.2 : zid === 'pasture' ? x0 + 1.2 : d.x + 2.4, sy = zid === 'garden' ? y1 - 1.2 : d.y - .4;
+  signBoard(z.title, sx, sy, g);
+  locks.set(zid, g);
+}
+// border: bushes along the edge of the world and a forest beyond it
 {
-  const bushes = [];
-  for (let y = 1.5; y < 24.5; y += 3.2) { bushes.push([.2 + srnd() * .4, y + srnd()]); bushes.push([19.6 + srnd() * .4, y + srnd()]); }
-  for (let x = 1; x < 19.5; x += 3) bushes.push([x + srnd(), .3 + srnd() * .3]);
   const decor = new THREE.Group(); scene.add(decor);
-  bushes.forEach(([x, y]) => bush(x, y, .9 + srnd() * .5, decor));
-  model('smallBarn', 2.1, 18.4, 13.2, -.35, decor);
-  model('woodlog', .3, 12.8, 10.6, .7, decor); model('woodlog', .3, 13.2, 10.9, .2, decor);
+  for (let y = WORLD.y0 + 1; y < WORLD.y1 - 1; y += 3.2) { bush(WORLD.x0 + .3 + srnd() * .4, y + srnd(), .9 + srnd() * .5, decor); bush(WORLD.x1 - .3 - srnd() * .4, y + srnd(), .9 + srnd() * .5, decor); }
+  for (let x = WORLD.x0 + 1; x < WORLD.x1 - 1; x += 3) bush(x + srnd(), WORLD.y0 + .3 + srnd() * .3, .9 + srnd() * .5, decor);
+  model('woodlog', .3, 12.8, 10.0, .7, decor); model('woodlog', .3, 13.2, 9.7, .2, decor);
   model('crate', .55, 1.6, 17.5, .3, decor); model('crate', .45, 1.9, 18.2, .9, decor);
   bakeMerge(decor);
 }
 for (const p of PADS) NO_GRASS.push([p.x - .95, p.y - .95, p.x + .95, p.y + .95]);
-for (const st of stallList) NO_GRASS.push([st.x - 1.4, st.y - 2.6, st.x + 2.4, st.y + .7]);
-NO_GRASS.push([NEST.x - 1, NEST.y - 1, NEST.x + 1, NEST.y + 1], [8.1, 4.6, 12, 8.6], [2.2, 2.9, 4.5, 4.6]);
 {
   // tuft: five blades with upward normals so they light like the ground
   const pos = [], col = [];
@@ -650,33 +848,41 @@ NO_GRASS.push([NEST.x - 1, NEST.y - 1, NEST.x + 1, NEST.y + 1], [8.1, 4.6, 12, 8
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(pos.map((_, i) => i % 3 === 1 ? 1 : 0), 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const N = LITE ? 1400 : 2400;
-  const grass = new THREE.InstancedMesh(geo, addWind(newMat({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 })), N);
-  grass.receiveShadow = true; grass.frustumCulled = false;
+  const N = LITE ? 6500 : 12000;
+  const grassMat = addWind(newMat({ vertexColors: true, side: THREE.DoubleSide, roughness: 1 }));
   const greens = ['#6cc43d', '#74ca45', '#66bd39', '#7dcf4d'].map(c => new THREE.Color(c));
-  let n = 0;
-  for (let tries = 0; n < N && tries < N * 4; tries++) {
-    const x = -3 + srnd() * 26, y = -2 + srnd() * 32;
-    if (!grassFree(x, y)) continue;
-    _o.position.set(x, 0, y); _o.rotation.set(0, srnd() * 6.3, 0); _o.scale.setScalar(.7 + srnd() * .8); _o.updateMatrix();
-    grass.setMatrixAt(n, _o.matrix); grass.setColorAt(n, greens[n % 4]); n++;
+  const X0 = WORLD.x0 - 3, Y0 = WORLD.y0 - 3, XW = WORLD.x1 - WORLD.x0 + 6, YH = WORLD.y1 - WORLD.y0 + 8;
+  const tufts = [];
+  for (let tries = 0; tufts.length < N && tries < N * 4; tries++) {
+    const x = X0 + srnd() * XW, y = Y0 + srnd() * YH;
+    if (grassFree(x, y)) tufts.push([x, y, srnd() * 6.3, .7 + srnd() * .8]);
   }
-  grass.count = n; _o.scale.setScalar(1); scene.add(grass);
-  // flowers
-  const F = 320, fl = new THREE.InstancedMesh(new THREE.SphereGeometry(.055, 8, 6).translate(0, .16, 0), addWind(newMat({ roughness: .7 })), F);
+  const place = (im, list, color) => {
+    list.forEach(([x, y, rot, sc], i) => { _o.position.set(x, 0, y); _o.rotation.set(0, rot, 0); _o.scale.setScalar(sc); _o.updateMatrix(); im.setMatrixAt(i, _o.matrix); im.setColorAt(i, color(i)); });
+    _o.scale.setScalar(1); _o.rotation.set(0, 0, 0); scene.add(cullable(im));
+  };
+  let gi = 0;
+  for (const part of chunks(tufts)) { const im = new THREE.InstancedMesh(geo, grassMat, part.length); im.receiveShadow = true; place(im, part, () => greens[gi++ % 4]); }
+  // flowers, in little clusters
+  const F = LITE ? 500 : 900, flGeo = new THREE.SphereGeometry(.055, 8, 6).translate(0, .16, 0), flMat = addWind(newMat({ roughness: .7 }));
   const fc = ['#ffffff', '#ffe14d', '#ff8fb8', '#b98cff', '#ffffff'].map(c => new THREE.Color(c));
-  let m = 0;
-  for (let tries = 0; m < F && tries < F * 6; tries++) {
-    const cx = -3 + srnd() * 26, cy = -2 + srnd() * 32;
-    for (let k = 0; k < 5 && m < F; k++) {
+  const fls = [];
+  for (let tries = 0; fls.length < F && tries < F * 6; tries++) {
+    const cx = X0 + srnd() * XW, cy = Y0 + srnd() * YH, col = fc[Math.floor(srnd() * fc.length)];
+    for (let k = 0; k < 5 && fls.length < F; k++) {
       const x = cx + (srnd() - .5) * .8, y = cy + (srnd() - .5) * .8;
-      if (!grassFree(x, y)) continue;
-      _o.position.set(x, 0, y); _o.rotation.set(0, 0, 0); _o.scale.setScalar(.8 + srnd() * .5); _o.updateMatrix();
-      fl.setMatrixAt(m, _o.matrix); fl.setColorAt(m, fc[(m >> 2) % fc.length]); m++;
+      if (grassFree(x, y)) fls.push([x, y, 0, .8 + srnd() * .5, col]);
     }
   }
-  fl.count = m; _o.scale.setScalar(1); fl.frustumCulled = false; scene.add(fl);
+  for (const part of chunks(fls)) place(new THREE.InstancedMesh(flGeo, flMat, part.length), part, (i) => part[i][4]);
 }
+// split instances into square chunks so three.js can skip the ones off screen (the world is much bigger than the view)
+function chunks(items, size = 14) {
+  const m = new Map();
+  for (const it of items) { const k = Math.floor(it[0] / size) + ',' + Math.floor(it[1] / size); if (!m.has(k)) m.set(k, []); m.get(k).push(it); }
+  return [...m.values()];
+}
+function cullable(im) { im.computeBoundingSphere(); im.frustumCulled = true; return im; }
 // forest around the farm: instanced copies of the tree models
 function instancedModel(name, spots, colorFor) {
   const a = A[name]; a.scene.updateMatrixWorld(true);
@@ -685,41 +891,40 @@ function instancedModel(name, spots, colorFor) {
   for (const part of parts) {
     const mats = Array.isArray(part.material) ? part.material : [part.material];
     const im = new THREE.InstancedMesh(part.geometry, mats.map(mm => { const c = mm.clone(); if (colorFor(mm.name)) c.color.set('#ffffff'); return c; }), spots.length);
-    im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
+    im.castShadow = true; im.receiveShadow = true;
     spots.forEach(([x, y, h, rot, tint], i) => {
       const s = h / a.size.y;
       _o.position.set(x - a.center.x * s, -a.min.y * s, y - a.center.z * s); _o.rotation.set(0, rot, 0); _o.scale.setScalar(s); _o.updateMatrix();
       im.setMatrixAt(i, _o.matrix.clone().multiply(part.matrixWorld));
       const c = colorFor(mats[0].name, tint); if (c) im.setColorAt(i, new THREE.Color(c));
     });
-    scene.add(im);
+    scene.add(cullable(im));
   }
   _o.scale.setScalar(1);
 }
 {
   const spots = [];
   const add = (x, y) => spots.push([x, y, 2.3 + srnd() * 1.4, srnd() * 6.3, Math.floor(srnd() * 4)]);
-  for (let y = -6; y < 33; y += 1.6) { add(-1.3 - srnd() * 1.2, y + srnd()); add(-3.6 - srnd() * 1.5, y + srnd()); add(21.3 + srnd() * 1.2, y + srnd()); add(23.6 + srnd() * 1.5, y + srnd()); }
-  for (let x = -.5; x < 21; x += 1.6) { add(x + srnd(), -1.2 - srnd() * 1.2); add(x + srnd(), -3.6 - srnd() * 1.5); add(x + srnd(), 29.2 + srnd() * 1.5); }
-  const greens = TREE_GREENS.map(c => c);
-  const colorFor = (name, tint) => name === 'Green' ? (tint === undefined ? true : greens[tint]) : null;
+  const { x0, y0, x1, y1 } = WORLD;
+  for (let y = y0 - 6; y < y1 + 8; y += 1.6) { add(x0 - 1.3 - srnd() * 1.2, y + srnd()); add(x0 - 3.6 - srnd() * 1.5, y + srnd()); add(x1 + 1.3 + srnd() * 1.2, y + srnd()); add(x1 + 3.6 + srnd() * 1.5, y + srnd()); }
+  for (let x = x0 - .5; x < x1 + 1; x += 1.6) { add(x + srnd(), y0 - 1.2 - srnd() * 1.2); add(x + srnd(), y0 - 3.6 - srnd() * 1.5); add(x + srnd(), ROAD_Y + 2.7 + srnd() * 1.5); }
+  const colorFor = (name, tint) => name === 'Green' ? (tint === undefined ? true : TREE_GREENS[tint]) : null;
   const forest = LITE ? spots.filter((_, i) => i % 2 === 0) : spots;
-  instancedModel('tree3', forest, colorFor);
+  for (const part of chunks(forest, 16)) instancedModel('tree3', part, colorFor);
   if (LITE) for (const [x, y, h] of forest) STATIC_BLOBS.push([x, y, h * .32, h * .32]);
 }
-const ovenDecor = (() => {
-  const g = new THREE.Group(); scene.add(g);
-  model('crate', .5, 8.0, 5.0, .4, g); model('crate', .42, 7.8, 5.6, 1.1, g); sack(12.0, 5.2, .7, -.3, g);
-  bakeMerge(g); return [g];
-})();
 
 // ---------- input ----------
 let moved = false;
-ov.addEventListener('pointerdown', e => { joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }; ov.setPointerCapture(e.pointerId); });
+let upBtn = null; // screen circle of the upgrade button: { x, y, r, id }
+ov.addEventListener('pointerdown', e => {
+  if (upBtn && Math.hypot(e.clientX - upBtn.x, e.clientY - upBtn.y) < upBtn.r + 10) { if (typeof openUpgrades === 'function') openUpgrades(upBtn.id); return; }
+  joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }; ov.setPointerCapture(e.pointerId);
+});
 ov.addEventListener('pointermove', e => { if (joy && e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; if (Math.hypot(joy.x - joy.ox, joy.y - joy.oy) > 20) moved = true; } });
 const endJoy = e => { if (joy && e.pointerId === joy.id) joy = null; };
 ov.addEventListener('pointerup', endJoy); ov.addEventListener('pointercancel', endJoy);
-addEventListener('keydown', () => { moved = true; });
+addEventListener('keydown', e => { moved = true; if ((e.key === 'e' || e.key === 'у' || e.key === 'Enter') && G.upNear && !G.paused && typeof openUpgrades === 'function') openUpgrades(G.upNear); });
 
 // ---------- juice: dust puffs and pop-in ----------
 const dust = new THREE.InstancedMesh(new THREE.SphereGeometry(.12, 10, 8), newMat({ color: '#f1d2a8', transparent: true, opacity: .6, roughness: 1 }), 80);
@@ -728,12 +933,23 @@ const puffs = []; let puffT = 0;
 function popScale(born) { const t = Math.min(1, (now - born) / .55); if (t >= 1) return 1; const u = t - 1; return Math.max(.01, 1 + 2.70158 * u * u * u + 1.70158 * u * u); }
 const born = new Map();
 function popIn(obj) { if (!born.has(obj)) born.set(obj, now); obj.scale.setScalar(popScale(born.get(obj))); }
+let firstSync = true; // things already built when the game loads appear without the pop
 
 // ---------- per-frame sync of the 3D scene ----------
 function sync() {
   camera.position.set(camX, Math.sin(PITCH) * camDist, camY + 1.2 + Math.cos(PITCH) * camDist);
   camera.lookAt(camX, 0, camY + 1.2);
-  sun.position.set(4, 22, 24); sun.target.position.set(10, 0, 13);
+  sun.position.set(camX - 6, 22, camY + 11); sun.target.position.set(camX, 0, camY);
+
+  // buildings that appear when bought
+  for (const [id, objs] of shown) {
+    const on = built(id);
+    for (const ob of objs) {
+      ob.visible = on;
+      if (on && !ob.isMesh) { if (firstSync) born.set(ob, -9); popIn(ob); } else if (!on) born.delete(ob);
+    }
+  }
+  for (const [zid, g] of locks) g.visible = !zoneOpen(zid);
 
   // people
   for (const p of people.values()) p.seen = false;
@@ -748,49 +964,72 @@ function sync() {
   }
   for (const [a, p] of people) if (!p.seen) { scene.remove(p.g); mixers.delete(p.mixer); people.delete(a); }
 
-  // chickens
-  while (chickenMeshes.length < chickens.length) chickenMeshes.push(makeChicken());
-  chickenMeshes.forEach((m, i) => { m.g.visible = i < chickens.length; if (!m.g.visible) born.delete(m.g); });
-  chickens.forEach((c, i) => {
-    const m = chickenMeshes[i];
-    m.g.position.set(c.x, 0, c.y); popIn(m.g);
+  // animals
+  for (const pen of penList) for (const c of pen.animals) {
+    let m = animalMeshes.get(c);
+    if (!m) { m = makeAnimal(pen.animal); animalMeshes.set(c, m); }
+    m.g.position.set(c.x, 0, c.y); if (firstSync) born.set(m.g, -9); popIn(m.g);
     const moving = Math.hypot(c.tx - c.x, c.ty - c.y) > .1;
     if (moving) m.g.rotation.y = Math.PI / 2 - Math.atan2(c.ty - c.y, c.tx - c.x);
-    const want = moving ? 'Run' : c.peck > .4 ? 'Idle_Peck' : 'Idle';
-    if (m.cur !== want) { m.actions[m.cur].fadeOut(.2); m.actions[want].reset().fadeIn(.2).play(); m.cur = want; }
-    m.actions.Run.timeScale = .55;
-  });
+    const want = moving ? m.k.move : c.peck > .4 ? m.k.eat : m.k.idle;
+    if (m.cur !== want && m.actions[want]) { m.actions[m.cur].fadeOut(.2); m.actions[want].reset().fadeIn(.2).play(); m.cur = want; }
+    if (m.actions[m.k.move]) m.actions[m.k.move].timeScale = m.k.moveTs;
+  }
 
-  // trees
-  trees.forEach((t, i) => {
-    const m = treeMeshes[i], on = G.bought.has('grove');
-    m.g.visible = on; if (!on) return;
-    const alive = t.logs > 0;
-    m.crown.visible = alive; m.stump.visible = !alive;
-    let sc = .82 + t.logs * .06;
-    if (t.pop && now - t.pop < .45) sc *= Math.sin(Math.min(1, (now - t.pop) / .45) * Math.PI * .7) / Math.sin(Math.PI * .7);
-    m.crown.scale.setScalar(Math.max(.01, sc));
-    m.crown.rotation.z = Math.sin(now * 40) * t.shake * .06;
-    const gr = 1 - t.regrow / TREE_REGROW; m.sapling.visible = gr > .3; m.sapling.scale.setScalar(Math.max(.01, gr));
-  });
+  // trees and crops
+  let nw = 0, np = 0, ns = 0, nb = 0, nl = 0;
+  for (const t of plants) {
+    if (t.group === 'grove') {
+      const m = plantMeshes.get(t), on = t.active;
+      m.g.visible = on; if (!on) continue;
+      const alive = t.logs > 0;
+      m.crown.visible = alive; m.stump.visible = !alive;
+      let sc = .82 + Math.min(t.logs, 5) * .06;
+      if (t.pop && now - t.pop < .45 && now >= t.pop) sc *= Math.sin(Math.min(1, (now - t.pop) / .45) * Math.PI * .7) / Math.sin(Math.PI * .7);
+      m.crown.scale.setScalar(Math.max(.01, sc));
+      m.crown.rotation.z = Math.sin(now * 40) * t.shake * .06;
+      const gr = 1 - t.regrow / regrowTime('grove'); m.sapling.visible = gr > .3; m.sapling.scale.setScalar(Math.max(.01, gr));
+      continue;
+    }
+    if (!t.active) continue;
+    let pop = 1;
+    if (t.pop && now >= t.pop && now - t.pop < .45) pop = Math.max(.01, Math.sin(Math.min(1, (now - t.pop) / .45) * Math.PI * .7) / Math.sin(Math.PI * .7));
+    _o.rotation.set(0, 0, 0); _o.position.set(t.x, 0, t.y); _o.scale.setScalar(1); _o.updateMatrix(); bedIM.setMatrixAt(nb++, _o.matrix);
+    const grown = t.logs > 0, gr = grown ? 1 : clamp(1 - t.regrow / regrowTime(t.group), 0, 1);
+    const wob = Math.sin(now * 40) * t.shake * .08;
+    if (t.group === 'field') {
+      const k = grown ? (t.logs >= 2 ? STALKS.length : 4) : 0;
+      for (let s = 0; s < STALKS.length; s++) {
+        const [dx, dz] = STALKS[s];
+        if (s < k) {
+          _o.position.set(t.x + dx, 0, t.y + dz); _o.rotation.set(wob, s * 1.7, 0); _o.scale.setScalar(pop * (.85 + (s % 3) * .08)); _o.updateMatrix(); wheatIM.setMatrixAt(nw++, _o.matrix);
+        } else if (!grown && gr > .05) {
+          _o.position.set(t.x + dx, 0, t.y + dz); _o.rotation.set(0, s, 0); _o.scale.setScalar(.3 + gr * .9); _o.updateMatrix(); sproutIM.setMatrixAt(ns++, _o.matrix);
+        }
+      }
+    } else {
+      _o.position.set(t.x, 0, t.y); _o.rotation.set(0, t.i, 0); _o.scale.setScalar(1); _o.updateMatrix(); leafIM.setMatrixAt(nl++, _o.matrix);
+      const s = grown ? pop : .25 + gr * .5;
+      _o.position.set(t.x, .02, t.y); _o.rotation.set(wob, t.i * 2.1, 0); _o.scale.setScalar(s); _o.updateMatrix(); pumpkinIM.setMatrixAt(np++, _o.matrix);
+    }
+  }
+  _o.scale.setScalar(1); _o.rotation.set(0, 0, 0);
+  for (const [im, n] of [[wheatIM, nw], [pumpkinIM, np], [sproutIM, ns], [bedIM, nb], [leafIM, nl]]) { im.count = n; im.instanceMatrix.needsUpdate = true; }
 
-  // buildings that appear when bought
-  ovenG.visible = G.bought.has('oven');
-  if (ovenG.visible) popIn(ovenG); else born.delete(ovenG);
-  for (const d of ovenDecor) d.visible = ovenG.visible;
-  ovenMouth.material.emissive.set(oven.cook > 0 ? '#ff8a20' : '#000000');
-  ovenMouth.material.emissiveIntensity = .8 + Math.sin(now * 12) * .2;
-  for (const z of Object.values(ovenZones)) { z.m.visible = ovenG.visible; z.draw(false, true); }
-  for (const t of ovenTrays) t.visible = ovenG.visible;
+  // converters
+  for (const [c, m] of convMeshes) {
+    if (!built(c.id)) continue;
+    if (m.mouth) { m.mouth.material.emissive.set(c.cook > 0 ? '#ff8a20' : '#000000'); m.mouth.material.emissiveIntensity = .8 + Math.sin(now * 12) * .2; }
+  }
   for (const st of stallList) {
     const open = isOpen(st);
     if (open && !stallMeshes.has(st)) stallMeshes.set(st, makeStall(st));
-    if (stallMeshes.has(st)) { const m = stallMeshes.get(st); m.visible = open; if (open) popIn(m); else born.delete(m); }
+    if (stallMeshes.has(st)) { const m = stallMeshes.get(st); m.visible = open; if (open) { if (firstSync) born.set(m, -9); popIn(m); } else born.delete(m); }
     if (open && !sellZones.has(st)) sellZones.set(st, zoneDecal(st.drop.x, st.drop.y, 'ПРОДАЖА'));
     if (sellZones.has(st)) { const z = sellZones.get(st); z.m.visible = open; if (open) z.draw(!hasCashier(st) && near(player, st.drop.x, st.drop.y, .95), !hasCashier(st)); }
   }
-  if (G.won && !bunting) bunting = makeBunting();
-  if (bunting) bunting.visible = G.won;
+  if (G.fair && !bunting) bunting = makeBunting();
+  if (bunting) bunting.visible = G.fair;
 
   // pads
   for (const d of padDecals.values()) d.m.visible = false;
@@ -811,11 +1050,10 @@ function sync() {
     for (let i = 0; i < st.shelf; i++) { const [x, y, z] = shelfPos(st, i); putItem(st.type, x, y, z + .06, 0); }
     for (let i = 0; i < Math.min(st.coins, 160); i++) { const [x, y, z] = coinPos(st, i); putItem('coin', x, y, z, (i * 1.7 % 1) * .3 - .15); }
   }
-  for (let i = 0; i < coop.eggs; i++) { const [x, y, z] = pilePos(NEST.x, NEST.y, i, ITEM.egg.h); putItem('egg', x, y, z + .1, i * .7); }
-  if (ovenG.visible) {
-    for (let i = 0; i < oven.egg; i++) putItem('egg', OVEN_IN.x - .3, OVEN_IN.y, .08 + i * ITEM.egg.h, 0);
-    for (let i = 0; i < oven.wood; i++) putItem('wood', OVEN_IN.x + .25, OVEN_IN.y, .08 + i * ITEM.wood.h, Math.PI / 2);
-    for (let i = 0; i < oven.pies; i++) { const [x, y, z] = pilePos(OVEN_OUT.x, OVEN_OUT.y, i, ITEM.pie.h); putItem('pie', x, y, z + .08, 0); }
+  for (const p of penList) for (let i = 0; i < p.stock; i++) { const [x, y, z] = pilePos(p.pile.x, p.pile.y, i, ITEM[p.item].h); putItem(p.item, x, y, z + .1, i * .7); }
+  for (const c of convList) if (built(c.id)) {
+    for (const t of Object.keys(c.in)) for (let i = 0; i < c.store[t]; i++) { const [x, y, z] = convInPos(c, t, i); putItem(t, x, y, z + .08, t === 'wood' ? Math.PI / 2 : 0); }
+    for (let i = 0; i < c.out_n; i++) { const [x, y, z] = pilePos(c.OUT.x, c.OUT.y, i, ITEM[c.out].h); putItem(c.out, x, y, z + .08, 0); }
   }
   for (const f of flyers) {
     const k = Math.min(1, f.age / f.dur), to = typeof f.to === 'function' ? f.to() : f.to;
@@ -836,23 +1074,23 @@ function sync() {
   windTime.value = now; clouds.offset.set(now * .006, now * .003);
   if (LITE) {
     const L = STATIC_BLOBS.slice();
-    L.push([3.3, 3.85, 1.25, .95]);
-    if (ovenG.visible) L.push([10, 5.75, 1.35, 1.05]);
+    for (const c of convList) if (built(c.id)) L.push([c.x, c.y + .15, c.w * .62, c.d * .55]);
     for (const st of stallList) if (isOpen(st)) L.push([st.x, st.y + .12, 1.45, .7]);
     for (const a of [player, ...helpers, ...customers]) L.push([a.x, a.y, .42, .42]);
     for (const a of stallCashiers.values()) if (people.has(a)) L.push([a.x, a.y, .42, .42]);
-    chickens.forEach(c => L.push([c.x, c.y, .28, .28]));
-    if (G.bought.has('grove')) for (const t of trees) if (t.logs > 0) L.push([t.x, t.y + .08, .75, .75]);
+    for (const p of penList) for (const c of p.animals) L.push([c.x, c.y, p.animal === 'cow' ? .7 : .28, p.animal === 'cow' ? .5 : .28]);
+    for (const d of DEFS) if (d.kind === 'decor' && d.model && built(d.id)) L.push([d.x, d.y + .05, .7, .55]);
+    for (const t of plants) if (t.active && t.group === 'grove' && t.logs > 0) L.push([t.x, t.y + .08, .75, .75]);
     drawBlobs(L);
   }
 
   // particles
-  let nc = 0, ns = 0;
+  let nc = 0, nsm = 0;
   for (const p of parts) {
     if (p.c === 'smoke') {
-      if (ns >= 120) continue;
+      if (nsm >= 160) continue;
       const s = .6 + (1.2 - p.life) * 1.2;
-      _o.position.set(p.x, p.z, p.y); _o.rotation.set(0, 0, 0); _o.scale.setScalar(s); _o.updateMatrix(); smoke.setMatrixAt(ns++, _o.matrix);
+      _o.position.set(p.x, p.z, p.y); _o.rotation.set(0, 0, 0); _o.scale.setScalar(s); _o.updateMatrix(); smoke.setMatrixAt(nsm++, _o.matrix);
     } else {
       if (nc >= 300) continue;
       _o.position.set(p.x, p.z + .05, p.y); _o.rotation.set(p.life * 9, p.life * 7, 0); _o.scale.setScalar(1); _o.updateMatrix();
@@ -860,33 +1098,51 @@ function sync() {
     }
   }
   _o.scale.setScalar(1);
-  confetti.count = nc; smoke.count = ns;
+  confetti.count = nc; smoke.count = nsm;
   confetti.instanceMatrix.needsUpdate = true; if (confetti.instanceColor) confetti.instanceColor.needsUpdate = true;
   smoke.instanceMatrix.needsUpdate = true;
+  firstSync = false;
 }
 
 // ---------- overlay (bubbles, texts, HUD) ----------
 function itemIcon(t, x, y, s) { // flat item icons for bubbles
   o.save(); o.translate(x, y); o.scale(s, s); o.lineWidth = .04;
+  const el = (cx, cy, rx, ry, c) => { o.beginPath(); o.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); o.fillStyle = c; o.fill(); };
   if (t === 'egg') {
     rr(o, -.42, .02, .84, .26, .06); o.fillStyle = '#c8935a'; o.fill();
-    for (const [dx, dy] of [[-.2, -.02], [.2, -.02], [0, -.12]]) { o.beginPath(); o.ellipse(dx, dy, .17, .21, 0, 0, Math.PI * 2); o.fillStyle = '#fff'; o.fill(); }
+    for (const [dx, dy] of [[-.2, -.02], [.2, -.02], [0, -.12]]) el(dx, dy, .17, .21, '#fff');
   } else if (t === 'wood') {
     for (const [dx, dy] of [[-.17, .1], [.17, .1], [0, -.12]]) {
       rr(o, dx - .2, dy - .1, .4, .2, .1); o.fillStyle = '#b06d32'; o.fill();
-      o.beginPath(); o.ellipse(dx + .19, dy, .07, .1, 0, 0, Math.PI * 2); o.fillStyle = '#f1c98e'; o.fill();
+      el(dx + .19, dy, .07, .1, '#f1c98e');
     }
   } else if (t === 'pie') {
-    o.beginPath(); o.ellipse(0, .08, .4, .17, 0, 0, Math.PI * 2); o.fillStyle = '#c27b33'; o.fill();
-    o.beginPath(); o.ellipse(0, 0, .38, .16, 0, 0, Math.PI * 2); o.fillStyle = '#f2bb5c'; o.fill();
+    el(0, .08, .4, .17, '#c27b33'); el(0, 0, .38, .16, '#f2bb5c');
     o.strokeStyle = '#c27b33'; o.beginPath(); o.moveTo(-.2, -.05); o.lineTo(.1, .08); o.moveTo(0, -.1); o.lineTo(.25, .02); o.stroke();
+  } else if (t === 'wheat') {
+    o.strokeStyle = '#c99a2e'; o.lineWidth = .06; for (const a of [-.3, 0, .3]) { o.beginPath(); o.moveTo(0, .38); o.lineTo(Math.sin(a) * .45, -.1); o.stroke(); }
+    for (const a of [-.3, 0, .3]) for (let k = 0; k < 3; k++) el(Math.sin(a) * (.42 + k * .09), -.1 - k * .11, .06, .09, '#f0cf5a');
+  } else if (t === 'flour') {
+    o.beginPath(); o.moveTo(-.14, -.26); o.quadraticCurveTo(-.36, 0, -.28, .34); o.lineTo(.28, .34); o.quadraticCurveTo(.36, 0, .14, -.26); o.closePath(); o.fillStyle = '#f4ecdc'; o.fill();
+    o.fillStyle = '#c27b33'; o.fillRect(-.16, -.34, .32, .08);
+  } else if (t === 'pumpkin') {
+    for (const dx of [-.18, .18, 0]) el(dx, .08, .2, .26, dx ? '#e07a22' : '#f08a2a');
+    o.fillStyle = '#6b8a2a'; o.fillRect(-.04, -.28, .08, .14);
+  } else if (t === 'milk') {
+    o.beginPath(); o.moveTo(-.16, .38); o.lineTo(-.16, -.02); o.lineTo(-.08, -.16); o.lineTo(-.08, -.28); o.lineTo(.08, -.28); o.lineTo(.08, -.16); o.lineTo(.16, -.02); o.lineTo(.16, .38); o.closePath(); o.fillStyle = '#fff'; o.fill();
+    o.fillStyle = '#3c8fd9'; o.fillRect(-.09, -.36, .18, .1); o.fillStyle = '#7cc0f5'; o.fillRect(-.16, .1, .32, .1);
+  } else if (t === 'cheese') {
+    o.beginPath(); o.moveTo(-.4, .26); o.lineTo(.4, .26); o.lineTo(.4, -.04); o.lineTo(-.4, -.26); o.closePath(); o.fillStyle = '#f5c842'; o.fill();
+    el(-.12, .08, .07, .06, '#d9a520'); el(.18, .12, .06, .05, '#d9a520');
+  } else if (t === 'cake') {
+    rr(o, -.36, .04, .72, .3, .06); o.fillStyle = '#fff2e6'; o.fill(); o.fillStyle = '#ff9cc4'; o.fillRect(-.36, .04, .72, .07);
+    rr(o, -.24, -.2, .48, .26, .06); o.fillStyle = '#ffd6e6'; o.fill(); el(0, -.28, .07, .07, '#e0303a');
   }
   o.restore();
 }
-function noteIcon(x, y, s) { cashIcon(o, x, y, s); }
 function text(t, x, y, size, fill = '#fff', stroke = '#1d3557', sw = size * .22, align = 'center') {
   o.font = `900 ${size}px ${FONT}`; o.textAlign = align; o.textBaseline = 'middle'; o.lineJoin = 'round';
-  o.lineWidth = sw; o.strokeStyle = stroke; o.strokeText(t, x, y); o.fillStyle = fill; o.fillText(t, x, y);
+  o.lineWidth = sw; o.strokeStyle = stroke; if (sw) o.strokeText(t, x, y); o.fillStyle = fill; o.fillText(t, x, y);
 }
 function star(cx, cy, r, fill) {
   o.beginPath();
@@ -897,13 +1153,10 @@ function patienceBar(x, y, w, f) {
   rr(o, x - w / 2, y, w, 7, 3.5); o.fillStyle = 'rgba(0,0,0,.35)'; o.fill();
   rr(o, x - w / 2, y, w * f, 7, 3.5); o.fillStyle = f > .5 ? '#6ad44f' : f > .25 ? '#f4b52c' : '#ec4a3c'; o.fill();
 }
-function goalIconHud(g, x, y) {
-  if (g.k === 'sell') return itemIcon(g.t, x, y, 26);
-  if (g.k === 'bake') return itemIcon('pie', x, y, 26);
-  if (g.k === 'earn') return cashIcon(o, x, y, 50);
-  if (g.k === 'rep') return star(x, y, 10, '#ffd23f');
-  if (g.k === 'serve') { o.fillStyle = '#8fb8ff'; o.beginPath(); o.arc(x, y - 4, 5, 0, Math.PI * 2); o.fill(); o.beginPath(); o.ellipse(x, y + 7, 8, 6, 0, Math.PI, 0); o.fill(); return; }
-  o.fillStyle = '#ff7a6b'; o.beginPath(); o.moveTo(x - 9, y); o.lineTo(x, y - 8); o.lineTo(x + 9, y); o.lineTo(x + 9, y + 8); o.lineTo(x - 9, y + 8); o.closePath(); o.fill();
+const fmtN = n => n >= 10000 ? (n / 1000).toFixed(1).replace('.', ',') + 'к' : String(n);
+function upArrow(x, y, s, col) {
+  o.beginPath(); o.moveTo(x, y - s); o.lineTo(x + s * .85, y); o.lineTo(x + s * .35, y); o.lineTo(x + s * .35, y + s * .8); o.lineTo(x - s * .35, y + s * .8); o.lineTo(x - s * .35, y); o.lineTo(x - s * .85, y); o.closePath();
+  o.fillStyle = col; o.fill();
 }
 function overlay(U) {
   o.clearRect(0, 0, W, H);
@@ -912,6 +1165,7 @@ function overlay(U) {
     if (c.state === 'in' && c.entered) {
       const st = stalls[c.stall], f = Math.max(0, Math.min(1, c.pat / c.patMax));
       const [sx, sy] = proj(c.x, c.y, 2.05);
+      if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
       if (st.queue[0] === c) {
         const w = U * 1.05, h = U * .62;
         rr(o, sx - w / 2, sy - h, w, h, U * .16); o.fillStyle = 'rgba(25,25,30,.88)'; o.fill();
@@ -943,8 +1197,28 @@ function overlay(U) {
     text(f.text, sx, sy, U * .36, f.color === '#fff' ? '#fff' : f.color, '#1d3557', U * .1);
     o.globalAlpha = 1;
   }
-  // hint arrows
+  // upgrade button over the building the player stands next to
+  upBtn = null;
   const h = G.curHint;
+  if (G.upNear && !G.paused) {
+    const a = upgradeAnchor(G.upNear), [bx, by0] = proj(a.x, a.y, 2.5), ok = anyUpgradeAffordable(G.upNear);
+    const r = Math.max(24, U * .42), by = by0 + Math.sin(now * 5) * (ok ? 3 : 0);
+    o.beginPath(); o.arc(bx, by, r + 4, 0, Math.PI * 2); o.fillStyle = '#fff'; o.fill();
+    o.beginPath(); o.arc(bx, by, r, 0, Math.PI * 2); o.fillStyle = ok ? '#4cbb45' : '#8d9aa6'; o.fill();
+    upArrow(bx, by - r * .05, r * .55, '#fff');
+    const label = BUILDING_TITLE(G.upNear);
+    o.font = `900 ${Math.round(r * .55)}px ${FONT}`;
+    const lw = o.measureText(label).width + 18;
+    rr(o, bx - lw / 2, by + r + 8, lw, r * .55 + 10, (r * .55 + 10) / 2); o.fillStyle = 'rgba(25,30,45,.62)'; o.fill();
+    text(label, bx, by + r + 13 + r * .275, Math.round(r * .55), '#fff', 'rgba(0,0,0,0)', 0);
+    upBtn = { x: bx, y: by, r, id: G.upNear };
+    if (h && h.up) { // tutorial: point at the button
+      const k = Math.abs(Math.sin(now * 4)) * 10;
+      o.beginPath(); o.moveTo(bx, by - r - 8 - k); o.lineTo(bx - 14, by - r - 30 - k); o.lineTo(bx + 14, by - r - 30 - k); o.closePath();
+      o.fillStyle = '#ffd23f'; o.fill(); o.lineWidth = 3; o.strokeStyle = '#c88a00'; o.stroke();
+    }
+  }
+  // hint arrows
   if (h && h.x !== undefined) {
     const [tx, ty] = proj(h.x, h.y, 1.6 + Math.abs(Math.sin(now * 4)) * .35);
     o.beginPath(); o.moveTo(tx - U * .28, ty - U * .42); o.lineTo(tx + U * .28, ty - U * .42); o.lineTo(tx, ty); o.closePath();
@@ -958,39 +1232,29 @@ function overlay(U) {
       o.fillStyle = 'rgba(110,235,245,.85)'; o.fill(); o.lineWidth = 2; o.strokeStyle = '#ffffff'; o.stroke();
     }
   }
-  // HUD
-  if (G.level < 0) return;
-  const top = 14, L = LV();
+  // HUD: money
+  const top = 14;
   o.font = `900 26px ${FONT}`;
-  const cw = o.measureText(G.coins).width;
+  const coinsTxt = fmtN(G.coins), cw = o.measureText(coinsTxt).width;
   rr(o, 12, top, cw + 70, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
   cashIcon(o, 38, top + 22, 70);
-  text(String(G.coins), 64, top + 23, 26, '#fff', 'rgba(0,0,0,0)', 0, 'left');
-  // timer: colour of the medal still reachable, bar = time left for it
-  const t = G.time, medal = t <= L.gold ? ['#ffcc29', L.gold, 0] : t <= L.silver ? ['#d3dbe3', L.silver, L.gold] : ['#d08a4e', 0, 0];
-  const tw = 108, tx = W / 2 - tw / 2;
-  rr(o, tx, top, tw, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
-  o.beginPath(); o.arc(tx + 22, top + 22, 9, 0, Math.PI * 2); o.fillStyle = medal[0]; o.fill();
-  text(fmtClock(t), tx + 38, top + 23, 22, '#fff', 'rgba(0,0,0,0)', 0, 'left');
-  if (medal[1]) {
-    const f = Math.max(0, (medal[1] - t) / (medal[1] - medal[2]));
-    rr(o, tx + 14, top + 38, (tw - 28), 4, 2); o.fillStyle = 'rgba(255,255,255,.2)'; o.fill();
-    rr(o, tx + 14, top + 38, (tw - 28) * f, 4, 2); o.fillStyle = medal[0]; o.fill();
-  }
-  // goals
-  const chips = L.goals.map(g => {
-    const [c, n] = goalProgress(g);
-    const label = g.k === 'build' ? (c ? '✓' : '0/1') : g.k === 'rep' ? String(c).replace('.', ',') + '/' + String(n).replace('.', ',') : Math.min(c, n) + '/' + n;
-    o.font = `900 16px ${FONT}`;
-    return { g, done: c >= n, label, w: 44 + o.measureText(label).width };
-  });
-  const gap = 6, total = chips.reduce((a, c) => a + c.w, 0) + gap * (chips.length - 1);
-  let cx = W / 2 - total / 2;
-  for (const c of chips) {
-    rr(o, cx, top + 52, c.w, 32, 16); o.fillStyle = c.done ? 'rgba(76,187,69,.92)' : 'rgba(0,0,0,.32)'; o.fill();
-    goalIconHud(c.g, cx + 18, top + 68);
-    text(c.label, cx + 34, top + 69, 16, '#fff', 'rgba(0,0,0,0)', 0, 'left');
-    cx += c.w + gap;
+  text(coinsTxt, 64, top + 23, 26, '#fff', 'rgba(0,0,0,0)', 0, 'left');
+  // what to save up for next
+  const goal = nextGoal();
+  if (goal && G.hint >= 3) {
+    const left = goal.cost - padPaid(goal), f = clamp(G.coins / Math.max(1, left), 0, 1);
+    const label = goal.label, sub = f >= 1 ? 'можно купить!' : `${fmtN(Math.min(G.coins, left))} / ${fmtN(left)}`;
+    o.font = `900 15px ${FONT}`; const lw1 = o.measureText(label).width; o.font = `900 13px ${FONT}`; const lw2 = o.measureText(sub).width;
+    const gw = Math.min(W - cw - 160, Math.max(lw1, lw2) + 64), gx = Math.max(cw + 92, W / 2 - gw / 2);
+    rr(o, gx, top, gw, 44, 22); o.fillStyle = 'rgba(0,0,0,.32)'; o.fill();
+    o.save(); rr(o, gx + 2, top + 2, gw - 4, 40, 20); o.clip();
+    o.fillStyle = f >= 1 ? 'rgba(76,187,69,.85)' : 'rgba(76,187,69,.45)'; o.fillRect(gx + 2, top + 2, (gw - 4) * f, 40);
+    o.restore();
+    padIconHud(goal.icon, gx + 24, top + 22);
+    o.save(); rr(o, gx + 42, top, gw - 50, 44, 0); o.clip();
+    text(label, gx + 44, top + 15, 15, '#fff', 'rgba(0,0,0,0)', 0, 'left');
+    text(sub, gx + 44, top + 32, 13, f >= 1 ? '#eaffd8' : 'rgba(255,255,255,.85)', 'rgba(0,0,0,0)', 0, 'left');
+    o.restore();
   }
   // customer rating (affects how many come) — small, bottom left
   const by = H - 26 - 8;
@@ -1003,10 +1267,10 @@ function overlay(U) {
   if (h && h.text) {
     o.font = `900 17px ${FONT}`;
     const hw = o.measureText(h.text).width;
-    rr(o, W / 2 - hw / 2 - 18, top + 92, hw + 36, 38, 19); o.fillStyle = 'rgba(25,30,45,.6)'; o.fill();
-    text(h.text, W / 2, top + 112, 17, '#fff', 'rgba(0,0,0,0)', 0);
+    rr(o, W / 2 - hw / 2 - 18, top + 54, hw + 36, 38, 19); o.fillStyle = 'rgba(25,30,45,.6)'; o.fill();
+    text(h.text, W / 2, top + 74, 17, '#fff', 'rgba(0,0,0,0)', 0);
   }
-  if (!moved && G.hint === 0 && G.level === 0) text('ВЕДИ ПАЛЬЦЕМ', W / 2, H * .9, Math.min(36, W * .085), '#ffffff', '#1d3557', 7);
+  if (!moved && G.hint === 0) text('ВЕДИ ПАЛЬЦЕМ', W / 2, H * .9, Math.min(36, W * .085), '#ffffff', '#1d3557', 7);
   if (joy) {
     o.beginPath(); o.arc(joy.ox, joy.oy, JOY_R, 0, Math.PI * 2); o.fillStyle = 'rgba(255,255,255,.22)'; o.fill();
     o.lineWidth = 4; o.strokeStyle = 'rgba(255,255,255,.75)'; o.stroke();
@@ -1015,6 +1279,7 @@ function overlay(U) {
     o.beginPath(); o.arc(joy.ox + dx, joy.oy + dy, 30, 0, Math.PI * 2); o.fillStyle = 'rgba(255,255,255,.9)'; o.fill();
   }
 }
+function padIconHud(kind, x, y) { padIcon(o, kind, x, y, 30); }
 
 const perf = { upd: 0, sync: 0, draw: 0, calls: 0, tris: 0 };
 const ema = (k, v) => { perf[k] += (v - perf[k]) * .1; };
@@ -1071,6 +1336,7 @@ function frame(t) {
   }
 }
 requestAnimationFrame(frame);
-window.__game = { G, META, LEVELS, player, stalls, coop, oven, PADS, buy, update, helpers, customers, trees, NEST, OVEN_IN, OVEN_OUT, render, padVisible, padPaid, startLevel, quitLevel, goalDone, ready: true, scene, gfx: GFX, charOf: (a) => people.get(a), fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }) };
+window.__game = { G, player, stalls, stallList, pens, convs, plants, PADS, DEFS, DEF, TRACKS, buy, buyUpgrade, update, helpers, customers, render, padVisible, padPaid, derive, save, resetFarm,
+  ready: true, scene, gfx: GFX, charOf: (a) => people.get(a), fx: () => useFx, perf: () => ({ ...perf, fps: fpsEma, dpr: DPR }), setCam: (x, y) => { camX = x; camY = y; } };
 document.getElementById('loading')?.remove();
 uiInit(resumed);

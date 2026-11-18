@@ -1,22 +1,36 @@
 'use strict';
 // Bump together with VERSION in sw.js whenever anything in public/ changes.
-const VERSION = '0.2.2';
-// Game state and simulation. No rendering here: view.js draws the world.
+const VERSION = '0.3.0';
+// Game state and simulation. No rendering here: view.js draws the world, ui.js the menus.
+// One persistent farm: everything bought stays bought; the world is saved continuously.
+// No offline progress: while the game is closed the farm waits.
 let camX = 10, camY = 14;
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const near = (a, x, y, r) => Math.hypot(a.x - x, a.y - y) < r;
 
 // ---------- world layout ----------
-const MAP_W = 20, MAP_H = 25.4;
-const ITEM = { egg: { h: .25, price: 2 }, wood: { h: .22, price: 3 }, pie: { h: .15, price: 8 } };
-const NEST = { x: 4.5, y: 7.9 };
-const OVEN_IN = { x: 8.8, y: 7.7 }, OVEN_OUT = { x: 11.2, y: 7.7 };
-const ROAD_Y = 26.5;
+// x grows east, y grows south. The market strip runs along the south edge, customers walk the road below it.
+const WORLD = { x0: -21, y0: -17, x1: 41, y1: 25.4 };
+const ROAD_Y = 26.5, ROAD_X0 = WORLD.x0 - 3, ROAD_X1 = WORLD.x1 + 3;
+const ITEM = {
+  egg: { h: .25, price: 2, name: 'Яйца' }, wood: { h: .22, price: 3, name: 'Дрова' }, pie: { h: .15, price: 8, name: 'Пироги' },
+  wheat: { h: .2, price: 2, name: 'Пшеница' }, flour: { h: .3, price: 6, name: 'Мука' }, pumpkin: { h: .34, price: 9, name: 'Тыквы' },
+  milk: { h: .34, price: 5, name: 'Молоко' }, cheese: { h: .17, price: 15, name: 'Сыр' }, cake: { h: .26, price: 30, name: 'Торты' },
+};
+// Land plots. The yard is owned from the start; the rest is fenced off until its land is bought.
+const ZONES = {
+  yard: { rect: [0, 0, 20, 25.4], title: 'Двор' },
+  field: { rect: [-21, 0, -.6, 25.4], land: 'landField', title: 'Поле' },
+  pasture: { rect: [20.6, 0, 41, 25.4], land: 'landPasture', title: 'Пастбище' },
+  garden: { rect: [0, -17, 20, -.6], land: 'landGarden', title: 'Огород' },
+};
 
-const G = { level: -1, done: false, coins: 0, coinsEver: 0, rep: 3, bought: new Set(['eggStall']), padPaid: {}, time: 0, won: false, hint: 0, hintT: 0, spawnT: 2, served: 0,
-  sold: { egg: 0, wood: 0, pie: 0 }, earned: 0, baked: 0 };
+const G = { coins: 0, coinsEver: 0, rep: 3, built: new Set(), up: {}, padPaid: {}, time: 0, hint: 0, hintT: 0, spawnT: 2, served: 0, earned: 0, cozy: 0, paused: false, fair: false };
 let now = 0;
+const built = id => G.built.has(id);
+const lvl = key => G.up[key] || 0; // upgrade level of a track, key = '<building>.<track>'
+const zoneOpen = z => !ZONES[z].land || built(ZONES[z].land);
 
 function mkActor(x, y, kind) {
   return { x, y, vx: 0, vy: 0, face: 1, dir: Math.PI / 2, stack: [], cap: 6, walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, tx: 0, chopT: 0, chopping: 0, kind };
@@ -24,169 +38,228 @@ function mkActor(x, y, kind) {
 const player = mkActor(10, 13.5, 'player');
 player.speed = 5.2;
 
-function mkStall(type, id, x) {
-  return { type, id, x, y: 19, shelf: 0, max: 14, coins: 0, queue: [], t: 0,
-    drop: { x: x + .2, y: 17.75 }, cz: { x: x + 1.5, y: 17.7 } };
+// ---------- buildings ----------
+// stalls: one per item, in a row along the market strip
+const stalls = {};
+function mkStall(item, id, x, zone, base) {
+  stalls[item] = { type: item, id, x, y: 19, zone, base, shelf: 0, max: 14, coins: 0, queue: [], t: 0, drop: { x: x + .2, y: 17.75 }, cz: { x: x + 1.5, y: 17.7 } };
 }
-const stalls = { egg: mkStall('egg', 'eggStall', 10), wood: mkStall('wood', 'woodStall', 14.6), pie: mkStall('pie', 'pieStall', 5.4) };
+mkStall('pie', 'pieStall', 5.4, 'yard', 90); mkStall('egg', 'eggStall', 10, 'yard', 40); mkStall('wood', 'woodStall', 14.6, 'yard', 50);
+mkStall('flour', 'flourStall', -4.6, 'field', 200); mkStall('pumpkin', 'pumpkinStall', -9.2, 'field', 400);
+mkStall('milk', 'milkStall', 25.4, 'pasture', 300); mkStall('cheese', 'cheeseStall', 30, 'pasture', 600); mkStall('cake', 'cakeStall', 34.6, 'pasture', 1200);
 const stallList = Object.values(stalls);
-const isOpen = st => G.bought.has(st.id);
-const CASH_ID = { egg: 'cashEgg', wood: 'cashWood', pie: 'cashPie' };
-const hasCashier = st => G.bought.has(CASH_ID[st.type]);
+const isOpen = st => built(st.id);
+const CASH_ID = { egg: 'cashEgg', wood: 'cashWood', pie: 'cashPie', flour: 'cashFlour', pumpkin: 'cashPumpkin', milk: 'cashMilk', cheese: 'cashCheese', cake: 'cashCake' };
+const hasCashier = st => built(CASH_ID[st.type]);
 const isSelling = st => hasCashier(st) || near(player, st.drop.x, st.drop.y, .95);
 
-const coop = { n: 1, eggs: 4, t: 0, max: 12 };
-const chickens = [];
-function addChicken() { chickens.push({ x: rnd(2.8, 6.5), y: rnd(4.8, 6.6), tx: 4, ty: 5, t: 0, face: 1, peck: 0 }); }
+// pens: animals inside a fence lay into a pile in front of it
+const pens = {
+  coop: { id: 'coop', item: 'egg', animal: 'chicken', pile: { x: 4.5, y: 7.9 }, area: [2.6, 4.7, 6.6, 6.7], fence: [2, 2.8, 7, 7], gate: [3.7, 5.3], house: { x: 3.3, y: 3.75 },
+    period: 3.2, n: 1, stock: 4, t: 0, max: 12, animals: [] },
+  cows: { id: 'cows', item: 'milk', animal: 'cow', pile: { x: 27, y: 10 }, area: [23.6, 3.8, 30.4, 8], fence: [22.6, 2.6, 31.4, 9.2], gate: [26, 28], house: { x: 24.6, y: 3.6 },
+    period: 5, n: 1, stock: 0, t: 0, max: 12, animals: [] },
+};
+const penList = Object.values(pens);
 
+// plants: trees are chopped with an axe, crops are picked; both grow back
+const plants = [];
 const TREE_POS = [[14.3, 3.6], [16.5, 3.1], [18.4, 4.3], [15.1, 6.0], [17.4, 6.5], [18.7, 8.4], [15.9, 8.6], [13.6, 8.0]];
-const trees = TREE_POS.map(([x, y]) => ({ x, y, logs: 3, regrow: 0, shake: 0 }));
-const TREE_REGROW = 10;
+for (const [x, y] of TREE_POS) plants.push({ group: 'grove', x, y });
+// wheat patches, nearest to the mill first so the field grows outwards
+{ const ps = []; for (let i = 0; i < 6; i++) for (let j = 0; j < 5; j++) ps.push([-10.9 - i * 1.5, 1.9 + j * 1.25]);
+  ps.sort((a, b) => Math.hypot(a[0] + 9, a[1] - 7) - Math.hypot(b[0] + 9, b[1] - 7)); for (const [x, y] of ps) plants.push({ group: 'field', x, y }); }
+{ const ps = []; for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) ps.push([2.6 + i * 1.7, -13.8 + j * 1.7]);
+  ps.sort((a, b) => Math.hypot(a[0] - 9, a[1] + 6) - Math.hypot(b[0] - 9, b[1] + 6)); for (const [x, y] of ps) plants.push({ group: 'garden', x, y }); }
+const PLANT_GROUPS = {
+  grove: { item: 'wood', kind: 'tree', regrow: 10, chop: .42, count: () => TREE_POS.length, logs: () => 3 + lvl('grove.logs') },
+  field: { item: 'wheat', kind: 'wheat', regrow: 9, chop: .2, count: () => 6 + 4 * lvl('field.more'), logs: () => 2 },
+  garden: { item: 'pumpkin', kind: 'pumpkin', regrow: 12, chop: .3, count: () => 4 + 2 * lvl('garden.more'), logs: () => 1 },
+};
+plants.forEach((p, i) => Object.assign(p, { i, logs: 0, regrow: 0, shake: 0, pop: 0 }));
+const plantActive = p => built(p.group) && plants.filter(q => q.group === p.group).indexOf(p) < PLANT_GROUPS[p.group].count();
+function plantIdx(p) { let k = 0; for (const q of plants) { if (q === p) return k; if (q.group === p.group) k++; } return -1; }
+const regrowTime = g => PLANT_GROUPS[g].regrow * Math.pow(.8, lvl(g + '.regrow'));
 
-const oven = { egg: 0, wood: 0, pies: 0, cook: 0, max: 6, outMax: 12 };
+// converters: take inputs at IN, cook, put the product on the OUT pile
+const convs = {
+  oven: { id: 'oven', in: { egg: 1, wood: 1 }, out: 'pie', time: 2.4, x: 10, y: 5.6, w: 2.2, d: 1.8, IN: { x: 8.8, y: 7.7 }, OUT: { x: 11.2, y: 7.7 } },
+  mill: { id: 'mill', in: { wheat: 2 }, out: 'flour', time: 2, x: -5.2, y: 4.4, w: 2.4, d: 2.2, IN: { x: -6.4, y: 7.6 }, OUT: { x: -4, y: 7.6 } },
+  dairy: { id: 'dairy', in: { milk: 2 }, out: 'cheese', time: 2.8, x: 36, y: 4.4, w: 2.6, d: 2.2, IN: { x: 34.8, y: 7.6 }, OUT: { x: 37.2, y: 7.6 } },
+  sweets: { id: 'sweets', in: { flour: 1, milk: 1 }, out: 'cake', time: 3.2, x: 14.5, y: -9, w: 2.6, d: 2.2, IN: { x: 13.3, y: -6.4 }, OUT: { x: 15.7, y: -6.4 } },
+};
+const convList = Object.values(convs);
+for (const c of convList) Object.assign(c, { store: Object.fromEntries(Object.keys(c.in).map(k => [k, 0])), out_n: 0, cook: 0, max: 6, outMax: 12 });
+const convTime = c => c.time * Math.pow(.85, lvl(c.id + '.speed'));
+
+// who makes each item (helpers fetch from here)
+const PRODUCER = { egg: ['pen', 'coop'], milk: ['pen', 'cows'], wood: ['plants', 'grove'], wheat: ['plants', 'field'], pumpkin: ['plants', 'garden'],
+  pie: ['conv', 'oven'], flour: ['conv', 'mill'], cheese: ['conv', 'dairy'], cake: ['conv', 'sweets'] };
+const producerBuilt = item => built(PRODUCER[item][1]);
 
 const customers = [];
 const helpers = [];
 const flyers = [], floats = [], parts = [];
 
-const PADS = [
-  { id: 'chick2', x: 8.4, y: 4.6, cost: 10, label: 'Курица', icon: 'chick', req: [] },
-  { id: 'cashEgg', x: 10.2, y: 16.0, cost: 30, label: 'Продавец', icon: 'person', req: ['chick2'] },
-  { id: 'grove', x: 16.2, y: 5.8, cost: 25, label: 'Роща', icon: 'tree', req: ['chick2'] },
-  { id: 'woodStall', x: 14.6, y: 19, cost: 30, label: 'Прилавок дров', icon: 'wood', req: ['grove'] },
-  { id: 'bag1', x: 7.4, y: 12.6, cost: 35, label: 'Корзина +4', icon: 'bag', req: ['grove'] },
-  { id: 'chick3', x: 8.4, y: 4.6, cost: 45, label: 'Курица', icon: 'chick', req: ['chick2', 'woodStall'] },
-  { id: 'boots', x: 12.6, y: 12.6, cost: 50, label: 'Сапоги-скороходы', icon: 'boots', req: ['woodStall'] },
-  { id: 'oven', x: 10, y: 5.6, cost: 80, label: 'Пекарня', icon: 'pie', req: ['woodStall'] },
-  { id: 'pieStall', x: 5.4, y: 19, cost: 70, label: 'Прилавок пирогов', icon: 'pie', req: ['oven'] },
-  { id: 'helper', x: 4.6, y: 11.4, cost: 120, label: 'Помощник: яйца', icon: 'person', req: ['pieStall'] },
-  { id: 'bag2', x: 7.4, y: 12.6, cost: 120, label: 'Корзина +6', icon: 'bag', req: ['bag1', 'pieStall'] },
-  { id: 'chick4', x: 8.4, y: 4.6, cost: 110, label: 'Курица', icon: 'chick', req: ['chick3', 'helper'] },
-  { id: 'helper2', x: 4.6, y: 11.4, cost: 220, label: 'Помощник: дрова', icon: 'person', req: ['helper'] },
-    { id: 'cashWood', x: 14.8, y: 16.0, cost: 70, label: 'Продавец', icon: 'person', req: ['woodStall'] },
-  { id: 'cashPie', x: 5.6, y: 16.0, cost: 120, label: 'Продавец', icon: 'person', req: ['pieStall'] },
-  { id: 'fair', x: 10, y: 14.0, cost: 500, label: 'Ярмарка', icon: 'flag', req: ['helper2', 'bag2', 'chick4', 'boots', 'cashEgg', 'cashWood', 'cashPie'] },
+// ---------- everything that can be bought ----------
+// kind: stall | pen | plants | conv | cashier | helper | land | decor. A pad (stand on it to pay) appears once `req` is met
+// and the pad's zone is owned. Buildings then get upgrade tracks (TRACKS), bought from a card near the building.
+const DEFS = [
+  { id: 'eggStall', kind: 'stall', label: 'Прилавок яиц', start: true },
+  { id: 'coop', kind: 'pen', label: 'Курятник', start: true },
+  { id: 'shed', kind: 'shed', label: 'Сарай', start: true },
+  { id: 'cashEgg', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 30, pad: [10.2, 16], req: [['coop.hens', 1]] },
+  { id: 'grove', kind: 'plants', label: 'Роща', icon: 'tree', cost: 25, pad: [16.2, 5.8], req: [['coop.hens', 1]] },
+  { id: 'woodStall', kind: 'stall', label: 'Прилавок дров', icon: 'wood', cost: 30, pad: [14.6, 19], req: ['grove'] },
+  { id: 'oven', kind: 'conv', label: 'Пекарня', icon: 'pie', cost: 80, pad: [10, 5.6], req: ['woodStall'] },
+  { id: 'cashWood', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 70, pad: [14.8, 16], req: ['woodStall', 'oven'] },
+  { id: 'pieStall', kind: 'stall', label: 'Прилавок пирогов', icon: 'pie', cost: 70, pad: [5.4, 19], req: ['oven'] },
+  { id: 'cashPie', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 120, pad: [5.6, 16], req: ['pieStall'] },
+  { id: 'helperEgg', kind: 'helper', item: 'egg', label: 'Помощник: яйца', icon: 'person', cost: 120, pad: [4.6, 11.4], req: ['pieStall'] },
+  { id: 'helperWood', kind: 'helper', item: 'wood', label: 'Помощник: дрова', icon: 'person', cost: 200, pad: [14.4, 11.4], req: ['helperEgg'] },
+  { id: 'helperPie', kind: 'helper', item: 'pie', label: 'Помощник: пироги', icon: 'person', cost: 260, pad: [7.4, 13.2], req: ['helperWood'] },
+  { id: 'bench1', kind: 'decor', label: 'Скамейка', icon: 'bench', cost: 50, pad: [3.2, 15.4], model: 'bench', rot: 0, cozy: 4, req: ['pieStall'] },
+  { id: 'flowers1', kind: 'decor', label: 'Клумба', icon: 'flower', cost: 40, pad: [12.6, 14], model: 'flowers', cozy: 3, req: ['pieStall'] },
+  { id: 'lamp1', kind: 'decor', label: 'Фонарь', icon: 'lamp', cost: 70, pad: [7.6, 16.2], model: 'lamp', cozy: 4, req: ['bench1'] },
+  { id: 'well', kind: 'decor', label: 'Колодец', icon: 'well', cost: 160, pad: [1.8, 9.6], model: 'well', cozy: 8, req: ['bench1', 'flowers1'], solid: .7 },
+  { id: 'landField', kind: 'land', zone: 'field', label: 'Земля: Поле', icon: 'land', cost: 300, pad: [1.4, 13], req: ['pieStall'] },
+  // field (west)
+  { id: 'field', kind: 'plants', label: 'Пшеничное поле', icon: 'wheat', cost: 60, pad: [-12.4, 4.4], req: ['landField'] },
+  { id: 'mill', kind: 'conv', label: 'Мельница', icon: 'mill', cost: 160, pad: [-5.2, 4.4], req: ['field'] },
+  { id: 'flourStall', kind: 'stall', label: 'Прилавок муки', icon: 'flour', cost: 150, pad: [-4.6, 19], req: ['mill'] },
+  { id: 'cashFlour', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 260, pad: [-4.4, 16], req: ['flourStall'] },
+  { id: 'helperWheat', kind: 'helper', item: 'wheat', label: 'Помощник: пшеница', icon: 'person', cost: 350, pad: [-9.4, 10.4], req: ['flourStall'] },
+  { id: 'helperFlour', kind: 'helper', item: 'flour', label: 'Помощник: мука', icon: 'person', cost: 450, pad: [-2.4, 12.4], req: ['helperWheat'] },
+  { id: 'bench2', kind: 'decor', label: 'Скамейка', icon: 'bench', cost: 120, pad: [-1.8, 15.4], model: 'bench', rot: 0, cozy: 4, req: ['flourStall'] },
+  { id: 'flowers2', kind: 'decor', label: 'Клумба', icon: 'flower', cost: 90, pad: [-14.4, 14.2], model: 'flowers', cozy: 3, req: ['flourStall'] },
+  { id: 'fountain', kind: 'decor', label: 'Фонтан', icon: 'fountain', cost: 600, pad: [-8.4, 13.8], model: 'fountain', cozy: 15, req: ['flourStall', 'well'], solid: 1.1 },
+  { id: 'landPasture', kind: 'land', zone: 'pasture', label: 'Земля: Пастбище', icon: 'land', cost: 1000, pad: [18.8, 13.8], req: ['flourStall'] },
+  // pasture (east)
+  { id: 'cows', kind: 'pen', label: 'Коровник', icon: 'cow', cost: 250, pad: [27, 6], req: ['landPasture'] },
+  { id: 'milkStall', kind: 'stall', label: 'Прилавок молока', icon: 'milk', cost: 200, pad: [25.4, 19], req: ['cows'] },
+  { id: 'dairy', kind: 'conv', label: 'Сыроварня', icon: 'cheese', cost: 500, pad: [36, 4.4], req: ['milkStall'] },
+  { id: 'cheeseStall', kind: 'stall', label: 'Прилавок сыра', icon: 'cheese', cost: 450, pad: [30, 19], req: ['dairy'] },
+  { id: 'cashMilk', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 500, pad: [25.6, 16], req: ['milkStall'] },
+  { id: 'cashCheese', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 800, pad: [30.2, 16], req: ['cheeseStall'] },
+  { id: 'helperMilk', kind: 'helper', item: 'milk', label: 'Помощник: молоко', icon: 'person', cost: 900, pad: [24.2, 12.2], req: ['cheeseStall'] },
+  { id: 'helperCheese', kind: 'helper', item: 'cheese', label: 'Помощник: сыр', icon: 'person', cost: 1100, pad: [33.4, 12.2], req: ['helperMilk'] },
+  { id: 'lamp2', kind: 'decor', label: 'Фонарь', icon: 'lamp', cost: 250, pad: [22.4, 16.2], model: 'lamp', cozy: 4, req: ['milkStall'] },
+  { id: 'bench3', kind: 'decor', label: 'Скамейка', icon: 'bench', cost: 300, pad: [38.6, 15.4], model: 'bench', rot: 0, cozy: 4, req: ['cheeseStall'] },
+  { id: 'flowers3', kind: 'decor', label: 'Клумба', icon: 'flower', cost: 260, pad: [39, 11], model: 'flowers', cozy: 3, req: ['cheeseStall'] },
+  { id: 'landGarden', kind: 'land', zone: 'garden', label: 'Земля: Огород', icon: 'land', cost: 2000, pad: [12.4, 1.4], req: ['cheeseStall'] },
+  // garden (north)
+  { id: 'garden', kind: 'plants', label: 'Тыквенные грядки', icon: 'pumpkin', cost: 400, pad: [5.6, -9.6], req: ['landGarden'] },
+  { id: 'pumpkinStall', kind: 'stall', label: 'Прилавок тыкв', icon: 'pumpkin', cost: 600, pad: [-9.2, 19], req: ['garden'] },
+  { id: 'sweets', kind: 'conv', label: 'Кондитерская', icon: 'cake', cost: 1500, pad: [14.5, -9], req: ['garden'] },
+  { id: 'cakeStall', kind: 'stall', label: 'Прилавок тортов', icon: 'cake', cost: 1500, pad: [34.6, 19], req: ['sweets'] },
+  { id: 'cashPumpkin', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 1000, pad: [-9, 16], req: ['pumpkinStall'] },
+  { id: 'cashCake', kind: 'cashier', label: 'Продавец', icon: 'person', cost: 2000, pad: [34.8, 16], req: ['cakeStall'] },
+  { id: 'helperPumpkin', kind: 'helper', item: 'pumpkin', label: 'Помощник: тыквы', icon: 'person', cost: 1800, pad: [9.6, -3.4], req: ['pumpkinStall'] },
+  { id: 'helperCake', kind: 'helper', item: 'cake', label: 'Помощник: торты', icon: 'person', cost: 2600, pad: [17.6, -4], req: ['cakeStall'] },
+  { id: 'lamp3', kind: 'decor', label: 'Фонарь', icon: 'lamp', cost: 600, pad: [1.4, -2.4], model: 'lamp', cozy: 4, req: ['garden'] },
+  { id: 'flowers4', kind: 'decor', label: 'Клумба', icon: 'flower', cost: 500, pad: [18, -14], model: 'flowers', cozy: 3, req: ['sweets'] },
+  { id: 'fair', kind: 'decor', label: 'Ярмарка', icon: 'flag', cost: 12000, pad: [10, 12.4], cozy: 30,
+    req: ['cakeStall', 'pumpkinStall', 'fountain', 'helperCake', 'helperCheese', 'helperFlour', 'helperPie'] },
 ];
-PADS.forEach(p => { p.stand = 0; p.payT = 0; p.pop = 0; });
-
-// ---------- levels (missions) and meta progression ----------
-// A level starts from a fresh farm: `start` is already built, only `pads` can be bought.
-// Stars by time: <= gold -> 3, <= silver -> 2, otherwise 1. A level cannot be lost.
-// gold/silver come from bot runs (test/calibrate.mjs): gold ~ 1.3x the bot, silver ~ 1.7x gold.
-const ALL_PADS = PADS.map(p => p.id);
-const LEVELS = [
-  { title: 'Первые яйца', start: ['eggStall'], pads: ['chick2'], goals: [{ k: 'sell', t: 'egg', n: 10 }], reward: 10, gold: 50, silver: 85 },
-  { title: 'Свой продавец', start: ['eggStall'], pads: ['chick2', 'cashEgg', 'chick3'], goals: [{ k: 'earn', n: 70 }, { k: 'build', id: 'cashEgg' }], reward: 14, gold: 95, silver: 160 },
-  { title: 'Дрова на продажу', start: ['eggStall'], coins: 15, pads: ['chick2', 'grove', 'woodStall', 'bag1'], goals: [{ k: 'sell', t: 'wood', n: 12 }, { k: 'sell', t: 'egg', n: 12 }], reward: 18, gold: 160, silver: 270 },
-  { title: 'Довольные покупатели', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'cashEgg', 'bag1'], goals: [{ k: 'serve', n: 20 }, { k: 'rep', n: 4.5 }], pat: .85, reward: 22, gold: 120, silver: 205 },
-  { title: 'Большая корзина', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'bag1', 'boots', 'cashEgg', 'cashWood'], goals: [{ k: 'earn', n: 180 }], reward: 26, gold: 165, silver: 280 },
-  { title: 'Пекарня', start: ['eggStall', 'grove', 'woodStall'], coins: 30, pads: ['chick2', 'oven', 'cashEgg', 'bag1'], goals: [{ k: 'build', id: 'oven' }, { k: 'bake', n: 6 }], reward: 30, gold: 150, silver: 255 },
-  { title: 'Пироги к чаю', start: ['eggStall', 'grove', 'woodStall', 'oven'], pads: ['pieStall', 'cashPie', 'chick2', 'chick3', 'bag1'], goals: [{ k: 'sell', t: 'pie', n: 8 }, { k: 'serve', n: 20 }], reward: 34, gold: 375, silver: 640 },
-  { title: 'Помощник', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall'], pads: ['helper', 'chick2', 'chick3', 'bag1', 'cashEgg'], goals: [{ k: 'build', id: 'helper' }, { k: 'earn', n: 300 }], reward: 38, gold: 245, silver: 415 },
-  { title: 'Спешка', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'cashEgg', 'cashWood', 'bag1', 'boots'], goals: [{ k: 'earn', n: 250 }], rate: 1.5, pat: .7, reward: 42, gold: 220, silver: 375 },
-  { title: 'Только пироги', start: ['pieStall', 'grove', 'oven'], pads: ['chick2', 'chick3', 'chick4', 'cashPie', 'bag1', 'helper2'], goals: [{ k: 'bake', n: 15 }, { k: 'sell', t: 'pie', n: 12 }], reward: 46, gold: 120, silver: 205 },
-  { title: 'Ярмарочный день', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall', 'chick2'], pads: ['chick3', 'chick4', 'cashEgg', 'cashWood', 'cashPie', 'helper', 'bag1', 'boots'], goals: [{ k: 'sell', t: 'egg', n: 30 }, { k: 'sell', t: 'wood', n: 20 }, { k: 'sell', t: 'pie', n: 12 }], rate: 1.3, reward: 52, gold: 500, silver: 850 },
-  { title: 'Без продавцов', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'bag1', 'boots', 'helper'], goals: [{ k: 'serve', n: 40 }, { k: 'rep', n: 4 }], rate: 1.3, reward: 56, gold: 220, silver: 375 },
-  { title: 'Большой заказ', start: ['eggStall', 'grove', 'woodStall'], pads: ['chick2', 'chick3', 'chick4', 'bag1', 'bag2', 'boots', 'cashEgg', 'cashWood', 'helper', 'helper2'], goals: [{ k: 'sell', t: 'egg', n: 50 }, { k: 'sell', t: 'wood', n: 45 }], reward: 60, gold: 285, silver: 485 },
-  { title: 'Строгие гости', start: ['eggStall', 'grove', 'woodStall', 'oven', 'pieStall'], pads: ['chick2', 'chick3', 'cashEgg', 'cashWood', 'cashPie', 'bag1', 'boots', 'helper'], goals: [{ k: 'serve', n: 45 }, { k: 'rep', n: 4.5 }], rate: 1.3, pat: .75, reward: 66, gold: 510, silver: 865 },
-  { title: 'Ярмарка', start: ['eggStall'], pads: ALL_PADS, goals: [{ k: 'build', id: 'fair' }], reward: 80, gold: 820, silver: 1395 },
-];
-const LV = () => LEVELS[Math.max(0, G.level)];
-const GOAL_ICON = { sell: g => g.t, earn: () => 'coin', bake: () => 'pie', serve: () => 'person', build: () => 'build', rep: () => 'star' };
-function goalProgress(g) {
-  if (g.k === 'sell') return [G.sold[g.t], g.n];
-  if (g.k === 'earn') return [G.earned, g.n];
-  if (g.k === 'bake') return [G.baked, g.n];
-  if (g.k === 'serve') return [G.served, g.n];
-  if (g.k === 'build') return [G.bought.has(g.id) ? 1 : 0, 1];
-  if (g.k === 'rep') return [Math.floor(G.rep * 10) / 10, g.n];
-  return [0, 1];
+const DEF = Object.fromEntries(DEFS.map(d => [d.id, d]));
+for (const d of DEFS) { // which plot each pad stands in
+  if (d.zone && d.kind === 'land') d.padZone = 'yard';
+  else d.padZone = Object.keys(ZONES).find(z => { const [x0, y0, x1, y1] = ZONES[z].rect; return d.pad && d.pad[0] >= x0 && d.pad[0] <= x1 && d.pad[1] >= y0 && d.pad[1] <= y1; }) || 'yard';
 }
-const goalDone = g => { const [c, n] = goalProgress(g); return c >= n; };
-function goalText(g) {
-  const item = { egg: 'яйца', wood: 'дрова', pie: 'пироги' };
-  if (g.k === 'sell') return `Продай ${item[g.t]}: ${g.n}`;
-  if (g.k === 'earn') return `Заработай ${g.n} монет`;
-  if (g.k === 'bake') return `Испеки пироги: ${g.n}`;
-  if (g.k === 'serve') return `Обслужи покупателей: ${g.n}`;
-  if (g.k === 'build') return `Построй: ${PADS.find(p => p.id === g.id).label}`;
-  if (g.k === 'rep') return `Рейтинг ${String(g.n).replace('.', ',')} звезды`;
-  return '';
-}
-
-const UPGRADES = [
-  { id: 'bag', title: 'Большая корзина', text: '+1 место в корзине' },
-  { id: 'speed', title: 'Лёгкие кроссовки', text: 'ходишь на 6% быстрее' },
-  { id: 'hens', title: 'Отборный корм', text: 'куры несутся на 8% чаще' },
-  { id: 'oven', title: 'Жаркая печь', text: 'пироги пекутся на 12% быстрее' },
-  { id: 'patience', title: 'Скамейка у прилавка', text: 'покупатели ждут на 10% дольше' },
-  { id: 'start', title: 'Копилка', text: '+10 монет в начале уровня' },
-];
-const UPGRADE_COST = [15, 30, 50, 80, 120];
-const UPGRADE_MAX = UPGRADE_COST.length;
-const META = { bank: 0, stars: {}, best: {}, up: {} };
-const up = id => META.up[id] || 0;
-const META_KEY = 'lavka-meta-v1', RUN_KEY = 'lavka-run-v1';
-function saveMeta() { try { localStorage.setItem(META_KEY, JSON.stringify(META)); } catch (e) {} }
-function loadMeta() {
-  try { const d = JSON.parse(localStorage.getItem(META_KEY)); if (d) Object.assign(META, d); } catch (e) {}
-  try { localStorage.removeItem('lavka-proto-v1'); } catch (e) {} // pre-levels prototype save
-}
-function upgradeCost(id) { return up(id) < UPGRADE_MAX ? UPGRADE_COST[up(id)] : null; }
-function buyUpgrade(id) {
-  const c = upgradeCost(id);
-  if (c === null || META.bank < c) return false;
-  META.bank -= c; META.up[id] = up(id) + 1; saveMeta();
-  return true;
-}
-const levelUnlocked = i => i === 0 || (META.stars[i - 1] || 0) > 0;
-const totalStars = () => Object.values(META.stars).reduce((a, b) => a + b, 0);
-function medalTimes(i) { const L = LEVELS[i]; return { gold: L.gold, silver: L.silver }; }
-function starsFor(i, t) { const { gold, silver } = medalTimes(i); return t <= gold ? 3 : t <= silver ? 2 : 1; }
-
-function resetWorld() {
-  const L = LV();
-  Object.assign(G, { done: false, coins: (L.coins || 0) + up('start') * 10, coinsEver: 0, rep: 3, bought: new Set(L.start), padPaid: {}, time: 0, won: false,
-    hint: G.level === 0 && !META.stars[0] ? 0 : 5, hintT: 0, spawnT: 2, served: 0, sold: { egg: 0, wood: 0, pie: 0 }, earned: 0, baked: 0 });
-  for (const st of stallList) { st.shelf = 0; st.coins = 0; st.queue.length = 0; st.t = 0; }
-  Object.assign(coop, { eggs: 4, t: 0 }); chickens.length = 0;
-  for (const t of trees) Object.assign(t, { logs: 3, regrow: 0, shake: 0, pop: 0 });
-  Object.assign(oven, { egg: 0, wood: 0, pies: 0, cook: 0 });
-  customers.length = 0; helpers.length = 0; flyers.length = 0; floats.length = 0; parts.length = 0;
-  for (const p of PADS) { p.stand = 0; p.payT = 0; }
-  Object.assign(player, { x: 10, y: 13.5, vx: 0, vy: 0, dir: Math.PI / 2, stack: [], walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, tx: 0, chopT: 0, chopping: 0 });
-  camX = clamp(player.x, 4, MAP_W - 4); camY = clamp(player.y, 5, MAP_H - 6);
-  derive();
-}
-function startLevel(i) { G.level = i; resetWorld(); save(); }
-function quitLevel() { G.level = -1; G.done = false; try { localStorage.removeItem(RUN_KEY); } catch (e) {} }
-function finishLevel() {
-  G.done = true;
-  const i = G.level, t = G.time, stars = starsFor(i, t), first = !META.stars[i];
-  const reward = Math.round(LEVELS[i].reward * stars * (first ? 1 : .5));
-  META.stars[i] = Math.max(META.stars[i] || 0, stars);
-  META.best[i] = Math.min(META.best[i] ?? Infinity, Math.round(t));
-  META.bank += reward;
-  saveMeta();
-  try { localStorage.removeItem(RUN_KEY); } catch (e) {}
-  const result = { level: i, time: t, stars, reward, first, best: META.best[i], hasNext: i + 1 < LEVELS.length };
-  if (typeof onLevelDone === 'function') onLevelDone(result);
-  return result;
-}
-
-const inLevel = id => LV().pads.includes(id) || LV().start.includes(id);
-const padVisible = p => !G.bought.has(p.id) && LV().pads.includes(p.id) && p.req.every(r => G.bought.has(r) || !inLevel(r));
+const PADS = DEFS.filter(d => d.pad);
+PADS.forEach(p => { p.x = p.pad[0]; p.y = p.pad[1]; p.stand = 0; p.payT = 0; p.pop = 0; });
+const reqOk = r => typeof r === 'string' ? built(r) : lvl(r[0]) >= r[1];
+const padVisible = p => !built(p.id) && zoneOpen(p.padZone) && (p.req || []).every(reqOk);
 const padPaid = p => G.padPaid[p.id] || 0;
 
-// solid obstacles (axis-aligned rects), active depending on what is built
+// ---------- upgrade tracks ----------
+// Each building has tracks; a track's level goes up by buying from the upgrade card (ui.js) near the building.
+const geo = (base, n, k = 2.1) => Array.from({ length: n }, (_, i) => Math.round(base * Math.pow(k, i) / 5) * 5 || base);
+const TRACKS = {
+  coop: [
+    { key: 'hens', title: 'Ещё курица', text: l => `кур: ${1 + l} → ${2 + l}`, costs: [10, 25, 45, 80, 130, 200, 300] },
+    { key: 'feed', title: 'Отборный корм', text: () => 'куры несутся на 12% чаще', costs: geo(60, 5) },
+  ],
+  cows: [
+    { key: 'herd', title: 'Ещё корова', text: l => `коров: ${1 + l} → ${2 + l}`, costs: [300, 550, 900, 1400, 2100] },
+    { key: 'feed', title: 'Сочное сено', text: () => 'молока на 12% больше', costs: geo(400, 5) },
+  ],
+  shed: [
+    { key: 'bag', title: 'Большая корзина', text: l => `несёшь ${6 + 2 * l} → ${8 + 2 * l}`, costs: geo(20, 8, 1.9) },
+    { key: 'boots', title: 'Сапоги-скороходы', text: () => 'ходишь на 8% быстрее', costs: geo(50, 5) },
+  ],
+  grove: [
+    { key: 'regrow', title: 'Удобрение', text: () => 'деревья растут на 20% быстрее', costs: geo(40, 4) },
+    { key: 'logs', title: 'Большие деревья', text: l => `поленьев с дерева: ${3 + l} → ${4 + l}`, costs: [90, 260] },
+  ],
+  field: [
+    { key: 'more', title: 'Распахать ещё', text: l => `грядок: ${6 + 4 * l} → ${10 + 4 * l}`, costs: geo(80, 6, 1.7) },
+    { key: 'regrow', title: 'Полив', text: () => 'пшеница растёт на 20% быстрее', costs: geo(120, 4) },
+  ],
+  garden: [
+    { key: 'more', title: 'Ещё грядки', text: l => `грядок: ${4 + 2 * l} → ${6 + 2 * l}`, costs: geo(500, 6, 1.6) },
+    { key: 'regrow', title: 'Полив', text: () => 'тыквы растут на 20% быстрее', costs: geo(700, 4) },
+  ],
+};
+const CONV_BASE = { oven: 60, mill: 150, dairy: 400, sweets: 1000 };
+for (const c of convList) TRACKS[c.id] = [{ key: 'speed', title: 'Мастерство', text: () => 'готовит на 15% быстрее', costs: geo(CONV_BASE[c.id], 5) }];
+for (const st of stallList) TRACKS[st.id] = [{ key: 'level', title: 'Нарядный прилавок', text: l => `полка ${14 + 4 * l} → ${18 + 4 * l}, цена +10%`, costs: geo(st.base, 6, 2) }];
+function trackOf(id, key) { return (TRACKS[id] || []).find(t => t.key === key); }
+function upgradeCost(id, key) { const t = trackOf(id, key), l = lvl(id + '.' + key); return t && l < t.costs.length ? t.costs[l] : null; }
+function buyUpgrade(id, key) {
+  const c = upgradeCost(id, key);
+  if (c === null || G.coins < c || !built(id)) return false;
+  G.coins -= c; G.up[id + '.' + key] = lvl(id + '.' + key) + 1;
+  derive();
+  const a = upgradeAnchor(id);
+  if (a) { burst(a.x, a.y, 1, ['#ffd84d', '#7ed0ff', '#ffffff', '#9be15d'], 22); floatText(a.x, a.y, 2.2, trackOf(id, key).title + '!', '#fff'); }
+  save();
+  return true;
+}
+const anyUpgradeAffordable = id => (TRACKS[id] || []).some(t => { const c = upgradeCost(id, t.key); return c !== null && c <= G.coins; });
+const SHED = { x: 17.6, y: 12.8 };
+// where the upgrade button floats; the player has to stand within UP_R of it
+function upgradeAnchor(id) {
+  if (pens[id]) return pens[id].pile;
+  if (convs[id]) return { x: convs[id].x, y: convs[id].y + 1.9 };
+  if (id === 'shed') return { x: SHED.x, y: SHED.y + 1.6 };
+  if (id === 'grove') return { x: 16, y: 10 };
+  if (id === 'field') return { x: -10, y: 9 };
+  if (id === 'garden') return { x: 9.2, y: -4.2 };
+  const st = stallList.find(s => s.id === id);
+  if (st) return { x: st.x - .9, y: 17.3 };
+  return null;
+}
+const UP_R = 2.2;
+const BUILDING_TITLE = id => (DEF[id] && DEF[id].label) || id;
+// the building whose upgrade button shows now: the closest one in reach
+function nearbyUpgrade() {
+  let best = null, bd = UP_R;
+  for (const id of Object.keys(TRACKS)) {
+    if (!built(id)) continue;
+    const a = upgradeAnchor(id); if (!a) continue;
+    const d = Math.hypot(player.x - a.x, player.y - a.y);
+    if (d < bd) { bd = d; best = id; }
+  }
+  return best;
+}
+
+// ---------- solids & movement limits ----------
 function solids() {
-  const r = [[1.9, 2.7, 7.1, 7.15]]; // coop fence
+  const r = [];
+  for (const p of penList) if (built(p.id) || p.id === 'coop') {
+    const [x0, y0, x1, y1] = p.fence; r.push([x0 - .1, y0 - .1, x1 + .1, y1 + .15]);
+  }
   for (const st of stallList) if (isOpen(st)) r.push([st.x - 1.15, st.y - .45, st.x + 1.15, st.y + .45]);
-  if (G.bought.has('oven')) r.push([8.9, 4.7, 11.1, 6.5]);
+  for (const c of convList) if (built(c.id)) r.push([c.x - c.w / 2, c.y - c.d / 2, c.x + c.w / 2, c.y + c.d / 2]);
+  r.push([SHED.x - 1.1, SHED.y - .8, SHED.x + 1.1, SHED.y + .8]);
+  for (const d of DEFS) if (d.solid && built(d.id)) r.push([d.x - d.solid, d.y - d.solid, d.x + d.solid, d.y + d.solid]);
+  for (const z of Object.values(ZONES)) if (z.land && !built(z.land)) r.push(z.rect);
   return r;
 }
+let SOLIDS = [];
 function collide(a, rad) {
-  for (const [x0, y0, x1, y1] of solids()) {
+  for (const [x0, y0, x1, y1] of SOLIDS) {
     const cx = clamp(a.x, x0, x1), cy = clamp(a.y, y0, y1);
     const dx = a.x - cx, dy = a.y - cy, d = Math.hypot(dx, dy);
     if (d < rad) {
@@ -196,12 +269,13 @@ function collide(a, rad) {
       } else { a.x = cx + dx / d * rad; a.y = cy + dy / d * rad; }
     }
   }
-  if (G.bought.has('grove')) for (const t of trees) {
-    if (t.logs <= 0 && t.regrow > TREE_REGROW * .6) continue;
+  for (const t of plants) {
+    if (t.group !== 'grove' || !t.active) continue;
+    if (t.logs <= 0 && t.regrow > regrowTime('grove') * .6) continue;
     const dx = a.x - t.x, dy = a.y - t.y, d = Math.hypot(dx, dy), m = rad + .28;
     if (d < m && d > 1e-4) { a.x = t.x + dx / d * m; a.y = t.y + dy / d * m; }
   }
-  a.x = clamp(a.x, .5, MAP_W - .5); a.y = clamp(a.y, 1.2, MAP_H - .4);
+  a.x = clamp(a.x, WORLD.x0 + .5, WORLD.x1 - .5); a.y = clamp(a.y, WORLD.y0 + .5, WORLD.y1 - .4);
 }
 
 // ---------- stacks & flyers ----------
@@ -243,30 +317,49 @@ function coinPos(st, i) {
   const col = Math.floor(i / 10) % 4, z = (i % 10) * .05 + Math.floor(i / 40) * .5;
   return [st.cz.x + (col % 2 - .5) * .3, st.cz.y + (col > 1 ? .2 : -.1), z];
 }
+function convInPos(c, t, n) {
+  const keys = Object.keys(c.in), k = keys.indexOf(t), dx = keys.length === 1 ? 0 : (k - (keys.length - 1) / 2) * .6;
+  return [c.IN.x + dx, c.IN.y, n * ITEM[t].h];
+}
 
 // ---------- derived state & buying ----------
 function derive() {
-  player.cap = 6 + up('bag') + (G.bought.has('bag1') ? 4 : 0) + (G.bought.has('bag2') ? 6 : 0);
-  player.speed = (G.bought.has('boots') ? 6.8 : 5.2) * (1 + .06 * up('speed'));
-  coop.n = 1 + ['chick2', 'chick3', 'chick4'].filter(id => G.bought.has(id)).length;
-  coop.max = 8 + coop.n * 4;
-  while (chickens.length < coop.n) addChicken();
-  if (G.bought.has('helper') && !helpers.some(h => h.job === 'egg')) addHelper('egg');
-  if (G.bought.has('helper2') && !helpers.some(h => h.job === 'wood')) addHelper('wood');
+  player.cap = 6 + 2 * lvl('shed.bag');
+  player.speed = 5.2 * (1 + .08 * lvl('shed.boots'));
+  pens.coop.n = 1 + lvl('coop.hens');
+  pens.cows.n = built('cows') ? 1 + lvl('cows.herd') : 0;
+  for (const p of penList) {
+    p.max = 8 + p.n * 4;
+    while (p.animals.length < p.n) addAnimal(p);
+  }
+  for (const st of stallList) st.max = 14 + 4 * lvl(st.id + '.level');
+  for (const t of plants) {
+    const was = t.active; t.active = plantActive(t);
+    if (t.active && !was && !t.inited) { t.logs = PLANT_GROUPS[t.group].logs(); t.inited = true; t.pop = now + plantIdx(t) * .05; }
+  }
+  for (const d of DEFS) if (d.kind === 'helper' && built(d.id) && !helpers.some(h => h.job === d.item)) addHelper(d);
+  G.cozy = DEFS.reduce((s, d) => s + (d.kind === 'decor' && built(d.id) ? d.cozy : 0), 0);
+  G.fair = built('fair');
+  SOLIDS = solids();
 }
-function addHelper(job) {
-  const h = mkActor(4.6, 11.4, 'helper');
-  Object.assign(h, { job, cap: 5, speed: 2.8, state: 'toSrc', wait: 0, tree: null, shirt: job === 'egg' ? '#e58b3a' : '#7c5bc4' });
+function addAnimal(p) {
+  const [x0, y0, x1, y1] = p.area;
+  p.animals.push({ x: rnd(x0, x1), y: rnd(y0, y1), tx: (x0 + x1) / 2, ty: (y0 + y1) / 2, t: 0, face: 1, peck: 0, born: now });
+}
+const HELPER_SHIRTS = { egg: '#e58b3a', wood: '#7c5bc4', pie: '#d94f6a', wheat: '#d9b23a', flour: '#8a9aa8', milk: '#3c8fd9', cheese: '#e0b020', pumpkin: '#e0702a', cake: '#e06aa8' };
+function addHelper(d) {
+  const h = mkActor(d.x, d.y, 'helper');
+  Object.assign(h, { job: d.item, cap: 5, speed: 2.9, state: 'toSrc', wait: 0, plant: null, shirt: HELPER_SHIRTS[d.item] || '#7c5bc4' });
   helpers.push(h);
 }
 function buy(p) {
-  G.bought.add(p.id);
+  G.built.add(p.id);
   delete G.padPaid[p.id];
   derive();
   burst(p.x, p.y, .3, ['#ffd84d', '#ff7a59', '#7ed0ff', '#ffffff', '#9be15d'], 30);
   floatText(p.x, p.y, 1.2, p.label + '!', '#fff');
-  if (p.id === 'grove') trees.forEach((t, i) => { t.logs = 3; t.regrow = 0; t.pop = now + i * .07; });
-  if (p.id === 'fair') G.won = true;
+  if (p.kind === 'decor' && p.cozy) floatText(p.x, p.y, 2, '+покупатели', '#ffe46b');
+  if (p.kind === 'land') { const [x0, y0, x1, y1] = ZONES[p.zone].rect; burst((x0 + x1) / 2, (y0 + y1) / 2, .5, ['#ffd84d', '#9be15d', '#ffffff'], 40); }
   save();
 }
 
@@ -309,7 +402,7 @@ function walkTo(a, x, y, dt) {
 }
 
 function update(dt) {
-  if (G.level < 0 || G.done || G.paused) return;
+  if (G.paused) return;
   now += dt; G.time += dt;
   // player movement
   let ix = 0, iy = 0;
@@ -323,16 +416,16 @@ function update(dt) {
   }
   moveActor(player, ix, iy, player.speed, dt);
   collide(player, .3);
-  camX += (clamp(player.x, 4, MAP_W - 4) - camX) * Math.min(1, dt * 5);
-  camY += (clamp(player.y, 5, MAP_H - 6) - camY) * Math.min(1, dt * 5);
+  camX += (clamp(player.x, WORLD.x0 + 4, WORLD.x1 - 4) - camX) * Math.min(1, dt * 5);
+  camY += (clamp(player.y, WORLD.y0 + 5, WORLD.y1 - 6) - camY) * Math.min(1, dt * 5);
 
-  updateCoop(dt); updateTrees(dt); updateOven(dt);
+  updatePens(dt); updatePlants(dt); updateConvs(dt);
   updateStalls(dt); updateCustomers(dt);
-  for (const h of helpers) updateHelper(h, dt);
+  for (const h of helpers) { updateHelper(h, dt); collide(h, .25); }
   playerInteract(dt);
   updatePads(dt);
   G.curHint = hint();
-  if (LV().goals.every(goalDone)) finishLevel();
+  G.upNear = nearbyUpgrade();
 
   for (let i = flyers.length - 1; i >= 0; i--) { const f = flyers[i]; f.age += dt; if (f.age >= f.dur) flyers.splice(i, 1); }
   for (let i = floats.length - 1; i >= 0; i--) { floats[i].t += dt; if (floats[i].t > 1.1) floats.splice(i, 1); }
@@ -342,53 +435,61 @@ function update(dt) {
   }
 }
 
-function updateCoop(dt) {
-  const period = 3.2 * (1 - .08 * up('hens'));
-  coop.t += dt * coop.n;
-  while (coop.t >= period) {
-    coop.t -= period;
-    if (coop.eggs < coop.max) {
-      coop.eggs++;
-      const c = chickens[Math.floor(Math.random() * chickens.length)];
-      if (c) fly('egg', [c.x, c.y, .2], pilePos(NEST.x, NEST.y, coop.eggs - 1, ITEM.egg.h), .4);
+function updatePens(dt) {
+  for (const p of penList) {
+    if (!p.n) continue;
+    const period = p.period * Math.pow(.88, lvl(p.id + '.feed'));
+    p.t += dt * p.n;
+    while (p.t >= period) {
+      p.t -= period;
+      if (p.stock < p.max) {
+        p.stock++;
+        const c = p.animals[Math.floor(Math.random() * p.animals.length)];
+        if (c) fly(p.item, [c.x, c.y, .3], pilePos(p.pile.x, p.pile.y, p.stock - 1, ITEM[p.item].h), .4);
+      }
+    }
+    const [x0, y0, x1, y1] = p.area, sp = p.animal === 'cow' ? .55 : .8;
+    for (const c of p.animals) {
+      c.t -= dt;
+      if (c.t <= 0) { c.tx = rnd(x0, x1); c.ty = rnd(y0, y1); c.t = rnd(2, p.animal === 'cow' ? 7 : 4); }
+      const dx = c.tx - c.x, dy = c.ty - c.y, d = Math.hypot(dx, dy);
+      if (d > .1) { c.x += dx / d * sp * dt; c.y += dy / d * sp * dt; c.face = Math.sign(dx) || c.face; c.peck = 0; }
+      else c.peck += dt;
     }
   }
-  for (const c of chickens) {
-    c.t -= dt;
-    if (c.t <= 0) { c.tx = rnd(2.6, 6.6); c.ty = rnd(4.7, 6.7); c.t = rnd(1.5, 4); }
-    const dx = c.tx - c.x, dy = c.ty - c.y, d = Math.hypot(dx, dy);
-    if (d > .1) { c.x += dx / d * .8 * dt; c.y += dy / d * .8 * dt; c.face = Math.sign(dx) || c.face; c.peck = 0; }
-    else c.peck += dt;
-  }
 }
-function updateTrees(dt) {
-  for (const t of trees) {
+function updatePlants(dt) {
+  for (const t of plants) {
+    if (!t.active) continue;
     t.shake = Math.max(0, t.shake - dt * 4);
-    if (t.logs <= 0) { t.regrow -= dt; if (t.regrow <= 0) { t.logs = 3; t.pop = now; } }
+    if (t.logs <= 0) { t.regrow -= dt; if (t.regrow <= 0) { t.logs = PLANT_GROUPS[t.group].logs(); t.pop = now; } }
   }
 }
-function updateOven(dt) {
-  if (!G.bought.has('oven')) return;
-  if (oven.cook > 0) {
-    oven.cook -= dt;
-    if (Math.random() < dt * 6) parts.push({ x: 10.65 + rnd(-.05, .05), y: 5.15, z: 1.7, vx: rnd(-.1, .3), vy: 0, vz: 1.2, life: 1.2, c: 'smoke' });
-    if (oven.cook <= 0) { oven.pies++; G.baked++; fly('pie', [10, 6.4, .4], pilePos(OVEN_OUT.x, OVEN_OUT.y, oven.pies - 1, ITEM.pie.h), .35); }
-  } else if (oven.egg > 0 && oven.wood > 0 && oven.pies < oven.outMax) {
-    oven.egg--; oven.wood--; oven.cook = 2.4 * (1 - .12 * up('oven'));
+function updateConvs(dt) {
+  for (const c of convList) {
+    if (!built(c.id)) continue;
+    if (c.cook > 0) {
+      c.cook -= dt;
+      if (Math.random() < dt * 6) parts.push({ x: c.x + .65 + rnd(-.05, .05), y: c.y - .45, z: 1.9, vx: rnd(-.1, .3), vy: 0, vz: 1.2, life: 1.2, c: 'smoke' });
+      if (c.cook <= 0) { c.out_n++; fly(c.out, [c.x, c.y + .8, .4], pilePos(c.OUT.x, c.OUT.y, c.out_n - 1, ITEM[c.out].h), .35); }
+    } else if (c.out_n < c.outMax && Object.entries(c.in).every(([k, n]) => c.store[k] >= n)) {
+      for (const [k, n] of Object.entries(c.in)) c.store[k] -= n;
+      c.cook = convTime(c);
+    }
   }
 }
 
-function priceOf(t) { return ITEM[t].price; }
+function priceOf(st) { return Math.round(ITEM[st.type].price * (1 + .1 * lvl(st.id + '.level'))); }
 function updateStalls(dt) {
   for (const st of stallList) {
     if (!isOpen(st)) continue;
     st.t -= dt;
     const c = st.queue[0];
     if (c && c.arrived && c.got < c.want && st.shelf > 0 && st.t <= 0 && isSelling(st)) {
-      st.shelf--; c.got++; st.t = .3; G.sold[st.type]++;
+      st.shelf--; c.got++; st.t = .3;
       fly(st.type, shelfPos(st, st.shelf), [c.x, c.y, 1.0], .25);
       if (c.got >= c.want) {
-        let pay = c.want * priceOf(st.type);
+        let pay = c.want * priceOf(st);
         const fast = c.pat / c.patMax > .5;
         if (fast) pay += Math.ceil(pay * .3);
         fly('coin', [c.x, c.y, 1], coinPos(st, st.coins), .35);
@@ -405,21 +506,26 @@ function leave(c, happy) {
   const st = stalls[c.stall];
   st.queue.splice(st.queue.indexOf(c), 1);
   c.state = 'out'; c.happy = happy; c.moodT = now;
-  const ex = Math.random() < .5 ? -1.5 : MAP_W + 1.5;
-  c.path = [[c.x + (c.x < 10 ? -.8 : .8), ROAD_Y], [ex, ROAD_Y]];
+  const ex = roadEnds()[c.from < 0 ? 0 : 1];
+  c.path = [[c.x + (c.from < 0 ? -.8 : .8), ROAD_Y], [ex, ROAD_Y]];
 }
 const SHIRTS = ['#4f8fe0', '#e05f7a', '#58b368', '#f0a43a', '#9a6ad6', '#3cb7b0', '#e2c84a'];
 const HAIR = ['#3b2a1e', '#6b4226', '#d9b26f', '#222', '#a0522d'];
+const cozyMul = () => 1 + G.cozy / 100;
+// customers come along the road from just beyond the owned land (off screen), not from the far ends of the world
+const roadEnds = () => [zoneOpen('field') ? ROAD_X0 : -1.5, zoneOpen('pasture') ? ROAD_X1 : 21.5];
 function spawnCustomer() {
   const open = stallList.filter(st => isOpen(st) && st.queue.length < (hasCashier(st) ? 4 : 3));
   if (!open.length) return;
   open.sort((a, b) => a.queue.length - b.queue.length + rnd(-1.2, 1.2));
   const st = open[0];
-  const want = st.type === 'pie' ? 1 + Math.floor(Math.random() * 2) : 1 + Math.floor(Math.random() * 3);
-  const fromLeft = Math.random() < .5;
-  const patMax = (45 - Math.min(12, G.served * .08)) * (LV().pat || 1) * (1 + .1 * up('patience'));
-  const c = { x: fromLeft ? -1.5 : MAP_W + 1.5, y: ROAD_Y, vx: 0, vy: 0, face: fromLeft ? 1 : -1, dir: fromLeft ? 0 : Math.PI, walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, stack: [], id: Math.random(),
-    speed: 2.3, stall: st.type, want, got: 0, pat: patMax, patMax, state: 'in', arrived: false,
+  const big = ITEM[st.type].price >= 8;
+  const want = big ? 1 + Math.floor(Math.random() * 2) : 1 + Math.floor(Math.random() * 3);
+  // mostly from the nearer end of the road
+  const [e0, e1] = roadEnds(), fromLeft = Math.random() < (st.x - e0 < e1 - st.x ? .8 : .2);
+  const patMax = (45 - Math.min(12, G.served * .05)) * (1 + G.cozy / 200);
+  const c = { x: fromLeft ? e0 : e1, y: ROAD_Y, vx: 0, vy: 0, face: fromLeft ? 1 : -1, dir: fromLeft ? 0 : Math.PI, walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, stack: [], id: Math.random(),
+    speed: 3.2, stall: st.type, want, got: 0, pat: patMax, patMax, state: 'in', arrived: false, from: fromLeft ? -1 : 1,
     shirt: SHIRTS[Math.floor(Math.random() * SHIRTS.length)], hair: HAIR[Math.floor(Math.random() * HAIR.length)], entered: false };
   st.queue.push(c); customers.push(c);
 }
@@ -428,7 +534,7 @@ function updateCustomers(dt) {
   G.spawnT -= dt;
   if (G.spawnT <= 0) {
     spawnCustomer();
-    G.spawnT = 5.5 * (3 / G.rep) / Math.pow(openN, .75) / (LV().rate || 1) * rnd(.7, 1.3);
+    G.spawnT = 5.5 * (3 / G.rep) / Math.pow(openN, .75) / cozyMul() * rnd(.7, 1.3);
   }
   for (let i = customers.length - 1; i >= 0; i--) {
     const c = customers[i];
@@ -454,41 +560,61 @@ function updateCustomers(dt) {
   }
 }
 
-function nearestTree(a, maxD) {
-  if (!G.bought.has('grove')) return null;
+function nearestPlant(a, group, maxD) {
   let best = null, bd = maxD;
-  for (const t of trees) if (t.logs > 0) { const d = Math.hypot(a.x - t.x, a.y - t.y); if (d < bd) { bd = d; best = t; } }
+  for (const t of plants) if (t.active && t.logs > 0 && (!group || t.group === group)) {
+    const d = Math.hypot(a.x - t.x, a.y - t.y); if (d < bd) { bd = d; best = t; }
+  }
   return best;
 }
-function chopTree(a, t, from) {
+function harvest(a, t) {
   t.logs--; t.shake = 1;
-  if (t.logs <= 0) t.regrow = TREE_REGROW;
-  pushStack(a, 'wood', [t.x, t.y, .9]);
-  burst(t.x, t.y + .1, .8, ['#5fae3e', '#7cc44f'], 5);
+  if (t.logs <= 0) t.regrow = regrowTime(t.group);
+  const it = PLANT_GROUPS[t.group].item;
+  pushStack(a, it, [t.x, t.y, t.group === 'grove' ? .9 : .3]);
+  burst(t.x, t.y + .1, .6, t.group === 'grove' ? ['#5fae3e', '#7cc44f'] : t.group === 'field' ? ['#f0d264', '#d9b23a'] : ['#f08a2a', '#5fae3e'], 5);
+}
+
+function feedConv(a, c) {
+  let best = null;
+  for (const t of Object.keys(c.in)) if (countIn(a, t) > 0 && c.store[t] < c.max && (!best || c.store[t] < c.store[best])) best = t;
+  if (!best) return false;
+  popStack(a, best, convInPos(c, best, c.store[best])); c.store[best]++;
+  return true;
+}
+function stockStall(a, st) {
+  if (st.shelf >= st.max || !countIn(a, st.type)) return false;
+  popStack(a, st.type, shelfPos(st, st.shelf)); st.shelf++;
+  return true;
+}
+function takeFromPen(a, p) {
+  if (p.stock <= 0) return false;
+  p.stock--; pushStack(a, p.item, pilePos(p.pile.x, p.pile.y, p.stock, ITEM[p.item].h)); return true;
+}
+function takeFromConv(a, c) {
+  if (c.out_n <= 0) return false;
+  c.out_n--; pushStack(a, c.out, pilePos(c.OUT.x, c.OUT.y, c.out_n, ITEM[c.out].h)); return true;
 }
 
 function playerInteract(dt) {
   const a = player, full = a.stack.length >= a.cap;
   a.tx -= dt;
-  // chopping
-  const tree = full ? null : nearestTree(a, 1.05);
-  if (tree) {
-    a.chopping += dt; a.chopT += dt;
-    a.face = tree.x > a.x ? 1 : -1; turnTo(a, Math.atan2(tree.y - a.y, tree.x - a.x), dt);
-    if (a.chopT >= .42) { a.chopT = 0; chopTree(a, tree); }
+  // harvesting: chop trees, pick crops
+  const t = full ? null : nearestPlant(a, null, 1.05);
+  if (t) {
+    a.chopping += dt; a.chopT += dt; a.tool = t.group === 'grove' ? 'axe' : 'none';
+    a.face = t.x > a.x ? 1 : -1; turnTo(a, Math.atan2(t.y - a.y, t.x - a.x), dt);
+    if (a.chopT >= PLANT_GROUPS[t.group].chop) { a.chopT = 0; harvest(a, t); }
   } else { a.chopT = 0; a.chopping = 0; }
 
   if (a.tx <= 0) {
     let did = false;
-    if (near(a, NEST.x, NEST.y, .95) && coop.eggs > 0 && !full) {
-      coop.eggs--; pushStack(a, 'egg', pilePos(NEST.x, NEST.y, coop.eggs, ITEM.egg.h)); did = true;
-    } else if (G.bought.has('oven') && near(a, OVEN_OUT.x, OVEN_OUT.y, .95) && oven.pies > 0 && !full) {
-      oven.pies--; pushStack(a, 'pie', pilePos(OVEN_OUT.x, OVEN_OUT.y, oven.pies, ITEM.pie.h)); did = true;
-    } else if (G.bought.has('oven') && near(a, OVEN_IN.x, OVEN_IN.y, .95)) {
-      did = feedOven(a);
-    } else {
-      for (const st of stallList) if (isOpen(st) && near(a, st.drop.x, st.drop.y, .95)) did = stockStall(a, st) || did;
+    for (const p of penList) if (!did && p.n && !full && near(a, p.pile.x, p.pile.y, .95)) did = takeFromPen(a, p);
+    for (const c of convList) if (!did && built(c.id)) {
+      if (!full && near(a, c.OUT.x, c.OUT.y, .95)) did = takeFromConv(a, c);
+      else if (near(a, c.IN.x, c.IN.y, .95)) did = feedConv(a, c);
     }
+    if (!did) for (const st of stallList) if (isOpen(st) && near(a, st.drop.x, st.drop.y, .95)) did = stockStall(a, st) || did;
     if (did) a.tx = .085;
   }
   // coins: collect quickly in chunks
@@ -497,21 +623,6 @@ function playerInteract(dt) {
     st.coins -= chunk; G.coins += chunk; G.coinsEver += chunk; G.earned += chunk;
     fly('coin', coinPos(st, st.coins), () => [player.x, player.y, 1.2], .3);
   }
-}
-function feedOven(a) {
-  const he = countIn(a, 'egg'), hw = countIn(a, 'wood');
-  const pos = (t, n) => [OVEN_IN.x + (t === 'egg' ? -.3 : .3), OVEN_IN.y, n * ITEM[t].h];
-  const canE = he > 0 && oven.egg < oven.max, canW = hw > 0 && oven.wood < oven.max;
-  let t = null;
-  if (canE && canW) t = oven.egg <= oven.wood ? 'egg' : 'wood'; else if (canE) t = 'egg'; else if (canW) t = 'wood';
-  if (!t) return false;
-  popStack(a, t, pos(t, oven[t])); oven[t]++;
-  return true;
-}
-function stockStall(a, st) {
-  if (st.shelf >= st.max || !countIn(a, st.type)) return false;
-  popStack(a, st.type, shelfPos(st, st.shelf)); st.shelf++;
-  return true;
 }
 
 function updatePads(dt) {
@@ -529,61 +640,72 @@ function updatePads(dt) {
   }
 }
 
+// ---------- helpers: each one carries one item from where it is made to where it is needed ----------
+function consumers(item) {
+  const r = [];
+  const st = stalls[item];
+  if (st && isOpen(st)) r.push({ kind: 'stall', st, x: st.drop.x + .35, y: st.drop.y - .25, fill: st.shelf / st.max });
+  for (const c of convList) if (built(c.id) && c.in[item]) r.push({ kind: 'conv', c, x: c.IN.x + .3, y: c.IN.y + .35, fill: c.store[item] / c.max });
+  return r;
+}
+function sourceSpot(h) {
+  const [kind, id] = PRODUCER[h.job];
+  if (kind === 'pen') return pens[id].n ? { x: pens[id].pile.x + .3, y: pens[id].pile.y + .35 } : null;
+  if (kind === 'conv') return built(id) ? { x: convs[id].OUT.x + .3, y: convs[id].OUT.y + .35 } : null;
+  if (!h.plant || h.plant.logs <= 0 || !h.plant.active) h.plant = nearestPlant(h, id, 99);
+  return h.plant ? { x: h.plant.x, y: h.plant.y + .75, plant: h.plant } : null;
+}
 function updateHelper(h, dt) {
   h.tx -= dt;
-  const full = h.stack.length >= h.cap;
-  if (h.job === 'egg') {
-    const st = stalls.egg;
-    if (h.state === 'toSrc') { if (walkTo(h, NEST.x + .3, NEST.y + .35, dt)) { h.state = 'pick'; h.wait = 0; } }
-    else if (h.state === 'pick') {
-      moveActor(h, 0, 0, h.speed, dt);
-      if (h.tx <= 0 && coop.eggs > 0 && !full) { coop.eggs--; pushStack(h, 'egg', pilePos(NEST.x, NEST.y, coop.eggs, ITEM.egg.h)); h.tx = .16; h.wait = 0; }
-      if (coop.eggs === 0 && h.stack.length) h.wait += dt;
-      if (full || h.wait > 1.5) h.state = 'toDst';
-    } else if (h.state === 'toDst') { if (walkTo(h, st.drop.x + .35, st.drop.y - .25, dt)) h.state = 'drop'; }
-    else if (h.state === 'drop') {
-      moveActor(h, 0, 0, h.speed, dt);
-      if (h.tx <= 0 && stockStall(h, st)) h.tx = .16;
-      if (!h.stack.length) h.state = 'toSrc';
-    }
-  } else {
-    if (h.state === 'toSrc') {
-      if (!h.tree || h.tree.logs <= 0) h.tree = nearestTree(h, 99);
-      if (!h.tree) { if (h.stack.length) h.state = 'toDst'; else moveActor(h, 0, 0, h.speed, dt); return; }
-      if (walkTo(h, h.tree.x, h.tree.y + .75, dt)) { h.state = 'chop'; h.chopT = 0; }
-    } else if (h.state === 'chop') {
-      moveActor(h, 0, 0, h.speed, dt);
-      h.chopping += dt;
-      if (!h.tree || h.tree.logs <= 0) { h.tree = null; h.chopping = 0; h.state = full ? 'toDst' : 'toSrc'; return; }
-      h.face = h.tree.x > h.x ? 1 : -1; turnTo(h, Math.atan2(h.tree.y - h.y, h.tree.x - h.x), dt);
+  const full = h.stack.length >= h.cap, [kind, id] = PRODUCER[h.job];
+  if (h.state === 'toSrc') {
+    const s = sourceSpot(h);
+    if (!s) { if (h.stack.length) h.state = 'toDst'; else moveActor(h, 0, 0, h.speed, dt); return; }
+    if (walkTo(h, s.x, s.y, dt)) { h.state = 'pick'; h.wait = 0; h.chopT = 0; }
+  } else if (h.state === 'pick') {
+    moveActor(h, 0, 0, h.speed, dt);
+    if (kind === 'plants') {
+      const t = h.plant;
+      if (!t || t.logs <= 0) { h.plant = null; h.chopping = 0; h.state = full || h.stack.length >= 3 ? 'toDst' : 'toSrc'; return; }
+      h.chopping += dt; h.tool = t.group === 'grove' ? 'axe' : 'none';
+      turnTo(h, Math.atan2(t.y - h.y, t.x - h.x), dt);
       h.chopT += dt;
-      if (h.chopT >= .6) { h.chopT = 0; chopTree(h, h.tree); }
+      if (h.chopT >= PLANT_GROUPS[id].chop * 1.4) { h.chopT = 0; harvest(h, t); }
       if (h.stack.length >= h.cap) { h.chopping = 0; h.state = 'toDst'; }
-    } else if (h.state === 'toDst') {
-      const st = stalls.wood;
-      const toOven = G.bought.has('oven') && (st.shelf >= st.max - 2 || oven.wood < 2);
-      h.dst = toOven ? 'oven' : 'stall';
-      const [x, y] = toOven ? [OVEN_IN.x + .3, OVEN_IN.y + .35] : [st.drop.x + .35, st.drop.y - .25];
-      if (walkTo(h, x, y, dt)) h.state = 'drop';
-    } else if (h.state === 'drop') {
-      moveActor(h, 0, 0, h.speed, dt);
-      if (h.tx <= 0) {
-        const ok = h.dst === 'oven' ? (oven.wood < oven.max && popStack(h, 'wood', [OVEN_IN.x + .3, OVEN_IN.y, oven.wood * ITEM.wood.h]) && ++oven.wood)
-          : stockStall(h, stalls.wood);
-        if (ok) h.tx = .16;
-        else if (h.dst === 'stall' && G.bought.has('oven') && oven.wood < oven.max) h.state = 'toDst';
-      }
-      if (!h.stack.length) h.state = 'toSrc';
+    } else {
+      const left = kind === 'pen' ? pens[id].stock : convs[id].out_n;
+      if (h.tx <= 0 && left > 0 && !full) { kind === 'pen' ? takeFromPen(h, pens[id]) : takeFromConv(h, convs[id]); h.tx = .16; h.wait = 0; }
+      if (left === 0 && h.stack.length) h.wait += dt;
+      if (full || h.wait > 1.5) h.state = 'toDst';
     }
+  } else if (h.state === 'toDst') {
+    const opts = consumers(h.job).filter(o => o.fill < 1).sort((a, b) => a.fill - b.fill);
+    if (!opts.length) { moveActor(h, 0, 0, h.speed, dt); return; } // everything is full: wait with the load
+    h.dst = opts[0];
+    if (walkTo(h, h.dst.x, h.dst.y, dt)) h.state = 'drop';
+  } else if (h.state === 'drop') {
+    moveActor(h, 0, 0, h.speed, dt);
+    if (h.tx <= 0) {
+      const ok = h.dst.kind === 'stall' ? stockStall(h, h.dst.st) : feedConv(h, h.dst.c);
+      if (ok) h.tx = .16;
+      else if (h.stack.length) h.state = 'toDst';
+    }
+    if (!h.stack.length) h.state = 'toSrc';
   }
 }
 
 // ---------- hints ----------
+// First steps are guided; afterwards the HUD shows what to save up for and an arrow to anything affordable.
+function nextGoal() {
+  let best = null;
+  for (const p of PADS) if (padVisible(p) && (!best || p.cost - padPaid(p) < best.cost - padPaid(best))) best = p;
+  return best;
+}
 function hint() {
-  const eggSt = stalls.egg;
+  const eggSt = stalls.egg, nest = pens.coop.pile;
   if (G.hint === 0) {
-    if (countIn(player, 'egg') >= 3 || (coop.eggs === 0 && player.stack.length)) G.hint = 1;
-    return { x: NEST.x, y: NEST.y, text: 'Собери яйца у курятника' };
+    if (countIn(player, 'egg') >= 3 || (pens.coop.stock === 0 && player.stack.length)) G.hint = 1;
+    return { x: nest.x, y: nest.y, text: 'Собери яйца у курятника' };
   }
   if (G.hint === 1) {
     if (eggSt.shelf > 0 && !countIn(player, 'egg')) G.hint = 2;
@@ -596,15 +718,15 @@ function hint() {
     return { text: 'Стой за прилавком, пока покупатель берёт яйца' };
   }
   if (G.hint === 3) {
-    if (G.bought.has('chick2')) { G.hint = 4; G.hintT = now; }
-    const p = PADS[0];
-    if (!padVisible(p)) { G.hint = 5; return null; }
-    if (G.coins + padPaid(p) < p.cost) return { text: 'Копи монеты: курица стоит ' + p.cost };
-    return { x: p.x, y: p.y, text: 'Встань на площадку — купишь курицу' };
+    if (lvl('coop.hens') > 0) { G.hint = 4; G.hintT = now; }
+    const c = upgradeCost('coop', 'hens');
+    if (G.coins < c) return { text: `Копи монеты: курица стоит ${c}` };
+    if (G.upNear === 'coop') return { up: true, text: 'Нажми ⬆ — купишь курицу' };
+    return { x: nest.x, y: nest.y, text: 'Подойди к курятнику' };
   }
   if (G.hint === 4) {
-    if (now - G.hintT > 5) G.hint = 5;
-    return { text: 'Больше кур — больше яиц. Открывай новое!' };
+    if (now - G.hintT > 6) G.hint = 5;
+    return { text: 'Улучшай постройки ⬆ и покупай новое на площадках' };
   }
   // afterwards: quietly point at an affordable pad
   let best = null, bd = 1e9;
@@ -616,33 +738,46 @@ function hint() {
 }
 
 // ---------- save / load ----------
-// META (stars, savings, upgrades) is saved on every change; the level in progress — every 2 s.
-function save() {
-  if (G.level < 0 || G.done) return;
-  const d = { level: G.level, coins: G.coins, coinsEver: G.coinsEver, rep: G.rep, bought: [...G.bought], padPaid: G.padPaid, time: G.time, won: G.won, hint: G.hint, served: G.served,
-    sold: G.sold, earned: G.earned, baked: G.baked,
-    shelves: Object.fromEntries(stallList.map(s => [s.type, [s.shelf, s.coins]])), eggs: coop.eggs, oven: [oven.egg, oven.wood, oven.pies],
+const SAVE_KEY = 'lavka-farm-v1';
+function snapshot() {
+  return { v: 1, coins: G.coins, coinsEver: G.coinsEver, rep: G.rep, built: [...G.built], up: G.up, padPaid: G.padPaid, time: G.time, hint: G.hint, served: G.served, earned: G.earned,
+    stalls: Object.fromEntries(stallList.map(s => [s.type, [s.shelf, s.coins]])), pens: Object.fromEntries(penList.map(p => [p.id, p.stock])),
+    convs: Object.fromEntries(convList.map(c => [c.id, [c.store, c.out_n]])), plants: plants.map(t => t.inited ? Math.round(t.logs) : -1),
     stack: player.stack.map(s => s.t), px: player.x, py: player.y };
-  try { localStorage.setItem(RUN_KEY, JSON.stringify(d)); } catch (e) {}
 }
-// Loads progress; returns true when a level was in progress (it stays paused until the UI resumes it).
-function load() {
-  loadMeta();
-  let d; try { d = JSON.parse(localStorage.getItem(RUN_KEY)); } catch (e) {}
-  if (!d || !LEVELS[d.level]) { G.level = -1; return false; }
-  G.level = d.level; resetWorld();
-  Object.assign(G, { coins: d.coins, coinsEver: d.coinsEver, rep: d.rep, padPaid: d.padPaid || {}, time: d.time, won: d.won, hint: d.hint, served: d.served || 0,
-    sold: d.sold || G.sold, earned: d.earned || 0, baked: d.baked || 0 });
-  G.bought = new Set(d.bought);
-  for (const s of stallList) if (d.shelves[s.type]) [s.shelf, s.coins] = d.shelves[s.type];
-  coop.eggs = d.eggs; [oven.egg, oven.wood, oven.pies] = d.oven;
-  player.stack = d.stack.map(t => ({ t, land: 0 })); player.x = d.px; player.y = d.py;
+function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) {} }
+function newFarm() {
+  Object.assign(G, { coins: 0, coinsEver: 0, rep: 3, built: new Set(DEFS.filter(d => d.start).map(d => d.id)), up: {}, padPaid: {}, time: 0, hint: 0, hintT: 0, spawnT: 2, served: 0, earned: 0 });
+  for (const st of stallList) { st.shelf = 0; st.coins = 0; st.queue.length = 0; st.t = 0; }
+  for (const p of penList) { p.stock = p.id === 'coop' ? 4 : 0; p.t = 0; p.animals.length = 0; }
+  for (const t of plants) Object.assign(t, { logs: 0, regrow: 0, shake: 0, pop: 0, active: false, inited: false });
+  for (const c of convList) { for (const k in c.store) c.store[k] = 0; c.out_n = 0; c.cook = 0; }
+  customers.length = 0; helpers.length = 0; flyers.length = 0; floats.length = 0; parts.length = 0;
+  for (const p of PADS) { p.stand = 0; p.payT = 0; }
+  Object.assign(player, { x: 10, y: 13.5, vx: 0, vy: 0, dir: Math.PI / 2, stack: [], walk: 0, sx: 0, sy: 0, svx: 0, svy: 0, tx: 0, chopT: 0, chopping: 0 });
   camX = player.x; camY = player.y;
   derive();
+}
+function resetFarm() { newFarm(); save(); }
+// Loads the farm (or starts a new one). Old level-mode saves from 0.2 are dropped.
+function load() {
+  try { for (const k of ['lavka-meta-v1', 'lavka-run-v1', 'lavka-proto-v1']) localStorage.removeItem(k); } catch (e) {}
+  newFarm();
+  let d; try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) {}
+  if (!d || d.v !== 1) return false;
+  Object.assign(G, { coins: d.coins || 0, coinsEver: d.coinsEver || 0, rep: d.rep || 3, up: d.up || {}, padPaid: d.padPaid || {}, time: d.time || 0, hint: d.hint || 0, served: d.served || 0, earned: d.earned || 0 });
+  G.built = new Set([...G.built, ...(d.built || []).filter(id => DEF[id])]);
+  derive();
+  for (const s of stallList) if (d.stalls && d.stalls[s.type]) [s.shelf, s.coins] = d.stalls[s.type];
+  for (const p of penList) if (d.pens && d.pens[p.id] !== undefined) p.stock = d.pens[p.id];
+  for (const c of convList) if (d.convs && d.convs[c.id]) { Object.assign(c.store, d.convs[c.id][0]); c.out_n = d.convs[c.id][1]; }
+  if (d.plants) plants.forEach((t, i) => { if (t.active && d.plants[i] >= 0) { t.logs = d.plants[i]; if (t.logs <= 0) t.regrow = regrowTime(t.group) * .5; } t.pop = 0; });
+  player.stack = (d.stack || []).filter(t => ITEM[t]).map(t => ({ t, land: 0 }));
+  if (typeof d.px === 'number') { player.x = d.px; player.y = d.py; }
+  camX = player.x; camY = player.y;
   if (G.hint === 4) G.hint = 5;
   return true;
 }
 setInterval(save, 2000);
 addEventListener('visibilitychange', () => { if (document.hidden) save(); });
-
-function fmtClock(t) { t = Math.max(0, Math.floor(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+addEventListener('pagehide', save);

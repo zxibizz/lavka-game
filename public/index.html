@@ -32,25 +32,8 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 .btn .cash svg{width:20px;height:20px}
 .bankrow{display:flex;justify-content:center;gap:18px;margin:10px 0 14px;font-size:20px}
 .bankrow span{display:inline-flex;align-items:center;gap:4px}.bankrow svg{width:24px;height:24px}
-#levels{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:4px 0 6px}
-.lvl{aspect-ratio:1;border:0;border-radius:14px;background:#7cc94f;color:#fff;font:900 20px Nunito,system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;box-shadow:0 3px 0 #4f9a32;padding:0;cursor:pointer;touch-action:manipulation}
-.lvl.done{background:#4cbb45}
-.lvl.locked{background:#e3dccb;box-shadow:0 3px 0 #cfc5ad;cursor:default}.lvl.locked svg{width:22px;height:22px}
-.stars{display:inline-flex;gap:1px}.star{width:14px;height:14px;fill:rgba(0,0,0,.18)}.star.on{fill:#ffcc29}
-.lvl .star{fill:rgba(255,255,255,.45)}.lvl .star.on{fill:#ffe14a}
-.stars.big .star{width:58px;height:58px;filter:drop-shadow(0 3px 0 rgba(0,0,0,.12))}.stars.big .star:nth-child(2){transform:translateY(-12px)}
-.goals{list-style:none;padding:0;margin:8px 0 12px;text-align:left}
-.goals li{display:flex;align-items:center;gap:10px;background:#f2ead6;border-radius:14px;padding:8px 12px;margin:6px 0;font-size:17px}
-.goals li svg{width:28px;height:28px;flex:none}.goals li span{flex:1}
-.goals li.ok{background:#d9f2c9}.goals li b{color:#2f6b28}
-.times{font-size:16px;color:#5d5747;margin:4px 0 14px;display:flex;justify-content:center;align-items:center;gap:6px;flex-wrap:wrap}
-.medal{display:inline-block;width:14px;height:14px;border-radius:50%;margin-left:6px}.medal.gold{background:#ffcc29;box-shadow:inset 0 -2px 0 #d9a400}.medal.silver{background:#d3dbe3;box-shadow:inset 0 -2px 0 #a8b2bd}
-.best{color:#8a8576;margin-left:8px}
-.note{font-size:15px;color:#b4562f;margin:-4px 0 10px;min-height:0}
-#resultTime{font-size:18px;margin:8px 0 2px}#resultHint{font-size:15px;color:#8a8576;margin-bottom:10px}
-#resultReward{font-size:20px;color:#2f6b28;margin-bottom:14px}#resultReward small{color:#8a8576;font-size:13px}
-#upgrades{list-style:none;padding:0;margin:6px 0 10px;text-align:left}
-#upgrades li{display:flex;align-items:center;gap:10px;background:#f2ead6;border-radius:14px;padding:10px 12px;margin:7px 0}
+#upList{list-style:none;padding:0;margin:6px 0 10px;text-align:left}
+#upList li{display:flex;align-items:center;gap:10px;background:#f2ead6;border-radius:14px;padding:10px 12px;margin:7px 0}
 .u-text{flex:1;display:flex;flex-direction:column;gap:2px}.u-text b{font-size:17px}.u-text span{font-size:14px;color:#6d675a}
 .pips{display:flex;gap:4px;margin-top:3px}.pips i{width:16px;height:6px;border-radius:3px;background:#d8ccad}.pips i.on{background:#4cbb45}
 #pauseBtn{position:fixed;top:calc(14px + env(safe-area-inset-top));right:12px;z-index:2;width:46px;height:46px;border:0;border-radius:23px;background:rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;touch-action:manipulation}
@@ -58,6 +41,7 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 #pauseBtn i{width:6px;height:18px;border-radius:2px;background:#fff}
 
 .gfx{margin-top:14px;font-size:15px;color:#6d675a;display:flex;align-items:center;justify-content:center;gap:8px}.gfx .btn.on{background:#4cbb45;color:#fff;box-shadow:0 3px 0 #2f8c2c}
+.stats{font-size:15px;color:#6d675a;margin:8px 0 14px;line-height:1.4}.stats b{color:#2f6b28}
 #pauseFps{font-size:12px;color:#a19b8a;margin-top:10px}
 </style>
 </head>
@@ -65,41 +49,24 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 <canvas id="gl"></canvas>
 <canvas id="ov"></canvas>
 <button id="pauseBtn" hidden aria-label="Пауза"><i></i><i></i></button>
-<div id="menu" class="screen" hidden><div class="card">
-  <h1>Лавочка</h1>
-  <div class="bankrow"><span id="menuBank"></span><span id="menuStars"></span></div>
-  <button id="continue" class="btn wide" hidden></button>
-  <div id="levels" style="margin-top:12px"></div>
-  <button id="shopBtn" class="btn alt wide">Мастерская</button>
-</div></div>
-<div id="intro" class="screen" hidden><div class="card">
-  <h2 id="introTitle"></h2><h3 id="introName"></h3>
-  <ul id="introGoals" class="goals"></ul>
-  <div id="introNote" class="note"></div>
-  <div id="introTimes" class="times"></div>
-  <div class="row"><button id="introBack" class="btn alt">Назад</button><button id="introStart" class="btn">Начать</button></div>
-</div></div>
 <div id="pause" class="screen" hidden><div class="card">
-  <h2>Пауза</h2><h3 id="pauseName" style="font-size:19px"></h3>
-  <ul id="pauseGoals" class="goals"></ul>
-  <button id="pauseResume" class="btn wide">Продолжить</button>
-  <div class="row" style="margin-top:10px"><button id="pauseRestart" class="btn alt">Заново</button><button id="pauseMenu" class="btn alt">Меню</button></div>
+  <h1 style="font-size:30px">Лавочка</h1>
+  <div id="pauseStats" class="stats"></div>
+  <button id="pauseResume" class="btn wide">Играть</button>
   <div class="gfx">Графика: <button id="gfxLite" class="btn small alt">Быстрая</button><button id="gfxFull" class="btn small alt">Красивая</button></div>
+  <button id="pauseReset" class="btn alt small" style="margin-top:16px">Начать ферму заново</button>
   <div id="pauseFps"></div>
 </div></div>
-<div id="result" class="screen" hidden><div class="card">
-  <h2>Уровень пройден!</h2><h3 id="resultName" style="font-size:19px"></h3>
-  <div id="resultStars" style="margin:14px 0 4px"></div>
-  <div id="resultTime"></div><div id="resultHint"></div>
-  <div id="resultReward"></div>
-  <button id="resultNext" class="btn wide">Дальше</button>
-  <div class="row" style="margin-top:10px"><button id="resultAgain" class="btn alt">Ещё раз</button><button id="resultMenu" class="btn alt">Меню</button></div>
+<div id="upgrades" class="screen" hidden><div class="card">
+  <h1 id="upTitle" style="font-size:26px"></h1>
+  <div class="bankrow"><span id="upBank"></span></div>
+  <ul id="upList"></ul>
+  <button id="upClose" class="btn wide">Готово</button>
 </div></div>
-<div id="shop" class="screen" hidden><div class="card">
-  <h1 style="font-size:28px">Мастерская</h1>
-  <div class="bankrow"><span id="shopBank"></span></div>
-  <ul id="upgrades"></ul>
-  <button id="shopClose" class="btn wide">Готово</button>
+<div id="reset" class="screen" hidden><div class="card">
+  <h3>Начать заново?</h3>
+  <p class="stats">Все постройки, улучшения и монеты пропадут. Отменить это нельзя.</p>
+  <div class="row"><button id="resetNo" class="btn">Нет, играть дальше</button><button id="resetYes" class="btn alt small">Да, с нуля</button></div>
 </div></div>
 <div id="loading" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:900 22px Nunito,system-ui;color:#fff;text-shadow:0 2px 0 #2f6b28">Загрузка…</div>
 <script type="importmap">{"imports":{"three":"./vendor/three.module.min.js"}}</script>
